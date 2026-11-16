@@ -1,0 +1,13 @@
+# Only publish the compact deploy copy of data, never raw CSV / ZIP.
+__pycache__/
+*.pyc
+*.csv
+*.zip
+*.tar.gz
+*.tmp
+.env
+.venv/
+.ipynb_checkpoints/
+.streamlit/secrets.toml
+Data/
+backup_before_extension_*/
