@@ -1,16 +1,16 @@
 """DATA 511 | Steam Player Observatory
 
-Warm-light dashboard, optimized V2: cached time-window stats, vectorized ranking,
-and one-time lazy daily loading. Chart percentage toggle in both views.
+Warm-light dashboard, peer-evaluation V3: onboarding, discoverable comparison,
+release-date tooltips, coverage notes, small multiples, and cached data handling.
 
 Run from the Steam Project folder:
     python -m pip install -r requirements.txt
-    python -m streamlit run steam_history_dashboard.py
+    python -m streamlit run app.py
 
 Expected files:
-    processed/steam_games.csv
-    processed/steam_monthly.csv
-    processed/steam_daily.csv  (only needed for Daily Deep Dive)
+    processed/steam_games.parquet (or CSV)
+    processed/steam_monthly.parquet (or CSV)
+    processed/steam_daily.parquet (or CSV; only needed for Daily Deep Dive)
 
 Monthly data: Kaggle and Mendeley; daily data: Mendeley (2017-2020).
 All charts use actual records. CCU ratios are activity proxies, NOT user retention.
@@ -110,6 +110,11 @@ st.markdown(
     .op-section{font-size:1.12rem;font-weight:700;color:#24334B;margin:3px 0}
     .op-note{font-size:.83rem;color:#7A879A;line-height:1.55}
     .op-rule{border-top:1px solid #E9ECF1;margin:1.1rem 0}
+    .op-help{background:#F0F4FB;border:1px solid #DFE7F4;border-radius:15px;
+      padding:14px 18px;margin:7px 0 16px;color:#37465A}
+    .op-help b{color:#25344E}
+    .op-help small{display:block;color:#65738A;margin-top:4px}
+    section[data-testid="stSidebar"] .stRadio{margin-bottom:.35rem}
     </style>
     """,
     unsafe_allow_html=True,
@@ -399,23 +404,45 @@ def line_plot(
                 pd.Timestamp(year=int((v-1)//12), month=int((v-1)%12+1), day=1)
                 for v in game["x_position"]
             ]
-            custom = game["year_month"].fillna("").tolist()
             hover_x = "%{x|%b %Y}"
         else:
             x = game["x_position"].astype(int).to_numpy()
-            custom = game["year_month"].fillna("").tolist()
             hover_x = "Month %{x} since release"
         suffix = "%" if measure == "Share of observed peak (%)" else " players"
+        observed = game.dropna(subset=["avg_ccu"])
+        first_month = str(observed["year_month"].iloc[0]) if len(observed) else "unknown"
+        last_month = str(observed["year_month"].iloc[-1]) if len(observed) else "unknown"
+        release = release_label(games, appid)
+        former = str(games.loc[appid, "mendeley_name"]).strip()
+        old_name = ("<br>Historical title: " + escape(former)
+                    if former and former.casefold() != name.casefold() else "")
+
+        # Use object dtype to keep numeric values numeric inside Plotly hover formatting.
+        peak = game["avg_ccu"].max()
+        relative = (100 * game["avg_ccu"] / peak) if peak > 0 else game["avg_ccu"] * np.nan
+        custom = np.empty((len(game), 5), dtype=object)
+        custom[:, 0] = game["year_month"].fillna("").to_numpy()
+        custom[:, 1] = game["avg_ccu"].to_numpy()
+        custom[:, 2] = game["peak_ccu"].to_numpy()
+        custom[:, 3] = relative.to_numpy()
+        custom[:, 4] = game["source"].fillna("Unknown").to_numpy()
         fig.add_trace(go.Scatter(
-            x=x, y=game["metric_value"], mode="lines+markers" if len(ids) <= 3 else "lines",
+            x=x, y=game["metric_value"],
+            mode="lines+markers" if (len(ids) <= 3 and len(game) <= 36) else "lines",
             name=name, connectgaps=False,
-            customdata=np.array(custom).reshape(-1, 1),
+            customdata=custom,
             line=dict(color="#C4CAD4" if faded else color, width=1.5 if faded else 3),
             marker=dict(size=5),
             opacity=.48 if faded else 1,
             hovertemplate=(
-                "<b>" + escape(name) + "</b><br>" + hover_x + "<br>" +
-                "%{y:,.1f}" + suffix + "<br>Source month: %{customdata[0]}<extra></extra>"
+                "<b>" + escape(name) + "</b><br>" + hover_x + "<br>"
+                "Chart value: %{y:,.1f}" + suffix + "<br>"
+                "Average CCU: %{customdata[1]:,.0f}<br>"
+                "Peak CCU: %{customdata[2]:,.0f}<br>"
+                "Relative to observed avg peak: %{customdata[3]:.1f}%<br>"
+                "Release date: " + escape(release) + old_name + "<br>"
+                "Window coverage: " + escape(first_month) + " – " + escape(last_month) + "<br>"
+                "Source: %{customdata[4]}<extra></extra>"
             ),
         ))
     fig.update_layout(height=470)
@@ -451,6 +478,107 @@ def comparison_bars(stats: pd.DataFrame, games: pd.DataFrame, ids: list[int], fi
     f.update_xaxes(title=suffix, zeroline=True, zerolinecolor=GRID)
     f.update_yaxes(title="", automargin=True)
     return f
+
+
+def release_label(games: pd.DataFrame, appid: int) -> str:
+    """Use known release date only; don't fabricate one for missing metadata."""
+    val = games.loc[appid, "release_dt"]
+    if pd.isna(val):
+        return "Not available"
+    return pd.Timestamp(val).strftime("%b %d, %Y")
+
+
+def starter_selection(candidates: pd.DataFrame) -> list[int]:
+    """Three recognizable examples with observations in the selected window."""
+    valid = set(candidates["appid"].astype(int))
+    preferred = [578080, 730, 105600, 271590, 570]
+    chosen = [appid for appid in preferred if appid in valid][:3]
+    chosen += [int(i) for i in candidates["appid"] if int(i) not in chosen][:max(0, 3-len(chosen))]
+    return chosen
+
+
+def open_manual_comparison(ids: list[int]) -> None:
+    """Button callback executes before rerun, when widget state is writable."""
+    st.session_state["comparison_mode"] = "Choose games"
+    st.session_state["manual_selected_games"] = list(ids)
+
+
+def coverage_message(stats: pd.DataFrame, ids: list[int], alignment: str,
+                     end_month: str) -> str:
+    """Warn of missing history without suggesting the game itself is inactive."""
+    if alignment != "Calendar months" or len(ids) < 2:
+        return ""
+    chosen = stats.loc[stats["appid"].isin(ids)]
+    if chosen.empty:
+        return ""
+    starts, ends = chosen["first_month"].nunique(), chosen["last_month"].nunique()
+    if starts > 1 or ends > 1:
+        return ("Selected games have different data coverage dates. A line ending early means "
+                "the dataset ends there, not that players disappeared. Check the coverage table below.")
+    return ""
+
+
+def small_multiple_plot(grid: pd.DataFrame, games: pd.DataFrame, ids: list[int],
+                        alignment: str, measure: str) -> go.Figure:
+    """Reduce overplotting for Top 10; use a common 0–100% scale in relative mode."""
+    ncols = 2
+    nrows = math.ceil(len(ids) / ncols)
+    titles = [str(games.loc[i, "game_name"]) for i in ids]
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        vertical_spacing=min(.12, .22 / max(nrows, 1)),
+                        horizontal_spacing=.10)
+    values = metric_series(grid, measure)
+    base = grid.copy()
+    base["metric_value"] = values
+    relative = measure == "Share of observed peak (%)"
+    for i, appid in enumerate(ids):
+        r, c = divmod(i, ncols)
+        g = base.loc[base["appid"].eq(appid)].sort_values("x_position")
+        if alignment == "Calendar months":
+            x = [pd.Timestamp(year=int((v-1)//12), month=int((v-1)%12+1), day=1)
+                 for v in g["x_position"]]
+        else:
+            x = g["x_position"]
+        label = str(games.loc[appid, "game_name"])
+        date_label = "%{x|%b %Y}" if alignment == "Calendar months" else "Month %{x} since release"
+        observed = g.dropna(subset=["avg_ccu"])
+        first_m = str(observed["year_month"].iloc[0]) if len(observed) else "unknown"
+        last_m = str(observed["year_month"].iloc[-1]) if len(observed) else "unknown"
+        denom = g["avg_ccu"].max()
+        pcts = 100*g["avg_ccu"]/denom if denom > 0 else g["avg_ccu"]*np.nan
+        custom = np.empty((len(g), 4), dtype=object)
+        custom[:, 0] = g["avg_ccu"].to_numpy()
+        custom[:, 1] = g["peak_ccu"].to_numpy()
+        custom[:, 2] = pcts.to_numpy()
+        custom[:, 3] = g["source"].fillna("Unknown").to_numpy()
+        fig.add_trace(go.Scatter(
+            x=x, y=g["metric_value"], mode="lines", connectgaps=False,
+            customdata=custom,
+            line=dict(color=COLORS[i % len(COLORS)], width=2.5),
+            showlegend=False, name=label,
+            hovertemplate=(
+                "<b>" + escape(label) + "</b><br>" + date_label + "<br>"
+                "Chart value: %{y:,.1f}" + ("%" if relative else " players") + "<br>"
+                "Average CCU: %{customdata[0]:,.0f}<br>"
+                "Peak CCU: %{customdata[1]:,.0f}<br>"
+                "Relative to observed avg peak: %{customdata[2]:.1f}%<br>"
+                "Release date: " + escape(release_label(games, appid)) + "<br>"
+                "Window coverage: " + escape(first_m) + " – " + escape(last_m) + "<br>"
+                "Source: %{customdata[3]}<extra></extra>"
+            ),
+        ), row=r+1, col=c+1)
+        fig.update_xaxes(gridcolor=GRID, showline=True, linecolor=GRID,
+                         nticks=6, row=r+1, col=c+1)
+        fig.update_yaxes(gridcolor=GRID, rangemode="tozero",
+                         range=[0, 105] if relative else None,
+                         ticksuffix="%" if relative else "", row=r+1, col=c+1)
+    fig.update_layout(
+        height=max(370, nrows * 265), template="plotly_white",
+        paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+        font=dict(family="Segoe UI, Inter, sans-serif", color=INK, size=12),
+        margin=dict(l=12, r=12, t=34, b=20), hovermode="closest",
+    )
+    return fig
 
 
 def safe_sources(view: pd.DataFrame, ids: list[int]) -> str:
@@ -569,8 +697,9 @@ if page == "Monthly Trends":
     genre_options = genres_available(games)
 
     with st.sidebar:
-        st.markdown("#### Time & comparison")
-        alignment = st.radio("Time axis", ["Calendar months", "Months since release"])
+        st.markdown("#### Time axis")
+        alignment = st.radio("Compare by", ["Calendar months", "Months since release"],
+                             help="Calendar time shows real dates; release alignment uses months since a known release date.")
         if alignment == "Calendar months":
             start_month, end_month = st.select_slider(
                 "Calendar window", options=all_months,
@@ -579,71 +708,107 @@ if page == "Monthly Trends":
             release_window = 12
             minimum_months = 3
         else:
-            release_window = st.select_slider("Release window", options=[3, 6, 12, 24], value=12)
+            release_window = st.select_slider("Months from release", options=[3, 6, 12, 24], value=12)
             minimum_months = max(2, math.ceil(release_window * .5))
             start_month, end_month = all_months[0], all_months[-1]
-            st.caption("Requires a known release date and observations beginning in launch month or the next month.")
+            st.caption("Only games observed beginning in release month or the next month qualify.")
 
-        st.markdown("#### Find & rank games")
-        select_mode = st.selectbox(
-            "Choose games", ["Top 5", "Top 10", "Genre leaders", "Manual search"]
-        )
-        default_genre = "Action" if select_mode == "Genre leaders" and "Action" in genre_options else "All genres"
-        genre = st.selectbox(
-            "Genre", ["All genres"] + genre_options,
-            index=(["All genres"] + genre_options).index(default_genre),
-        )
-        publisher_query = st.text_input("Publisher contains (optional)", placeholder="e.g., Valve")
-        rank_by = st.selectbox(
-            "Rank games by", ["Observed peak CCU", "Average CCU", "End / peak ratio", "Steepest monthly drop"]
-        )
-        units = st.radio(
-            "Line chart units", ["CCU (absolute)", "Relative to peak (%)"],
-            horizontal=True, help="100% = this game's highest observed monthly average within the selected window.",
-        )
+        st.divider()
+        st.markdown("#### Chart units")
+        units = st.radio("Display values as", ["Relative to peak (%)", "CCU (absolute)"],
+                         horizontal=False,
+                         help="Each game has its own 100% = highest monthly average CCU in the chosen window.")
         if units == "Relative to peak (%)":
             measure = "Share of observed peak (%)"
         else:
-            measure = st.selectbox(
-                "CCU series", ["Monthly average CCU", "Monthly peak CCU"]
+            measure = st.selectbox("CCU series", ["Monthly average CCU", "Monthly peak CCU"])
+        st.caption("CCU = players online simultaneously, not unique players or user retention.")
+        with st.expander("More filters", expanded=False):
+            publisher_query = st.text_input("Publisher contains", placeholder="e.g., Valve")
+        st.divider()
+
+    st.markdown(
+        '<div class="op-help"><b>Start here · Compare Steam games</b>'
+        '<small>1. Try the three example games below. &nbsp; '
+        '2. Choose <b>Choose games</b> to search and add up to 10 games. &nbsp; '
+        '3. Hover over the lines for player counts, release dates and data coverage.</small></div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        st.markdown("#### 1 · Select games to compare")
+        select_mode = st.radio(
+            "Comparison mode",
+            ["Starter comparison", "Top 5", "Top 10", "Genre leaders", "Choose games"],
+            horizontal=True,
+            key="comparison_mode",
+        )
+        left_control, right_control = st.columns([1, 1])
+        with left_control:
+            genre = st.selectbox("Genre", ["All genres"] + genre_options,
+                                 help="Unknown metadata is retained when All genres is selected.")
+        with right_control:
+            rank_by = st.selectbox(
+                "Rank games by",
+                ["Observed peak CCU", "Average CCU", "End / peak ratio", "Steepest monthly drop"],
+                help="Used for Top 5, Top 10 and Genre leaders; not for custom selection.",
             )
 
-    filtered_games = filter_games(games, genre, publisher_query)
-    cached_window, cached_stats = prepared_monthly_window(
-        alignment, start_month, end_month, release_window,
-        GAMES_PATH.stat().st_mtime_ns, MONTHLY_PATH.stat().st_mtime_ns,
-    )
-    # Cheap subsets only: never recalculate 7,000 game statistics on a style change.
-    if genre == "All genres" and not publisher_query.strip():
-        window_data, full_stats = cached_window, cached_stats
-    else:
-        filtered_ids = filtered_games.index
-        window_data = cached_window.loc[cached_window["appid"].isin(filtered_ids)]
-        full_stats = cached_stats.loc[cached_stats["appid"].isin(filtered_ids)]
-    candidates = rank_stats(full_stats, rank_by, minimum_months)
+        filtered_games = filter_games(games, genre, publisher_query)
+        cached_window, cached_stats = prepared_monthly_window(
+            alignment, start_month, end_month, release_window,
+            GAMES_PATH.stat().st_mtime_ns, MONTHLY_PATH.stat().st_mtime_ns,
+        )
+        if genre == "All genres" and not publisher_query.strip():
+            window_data, full_stats = cached_window, cached_stats
+        else:
+            filtered_ids = filtered_games.index
+            window_data = cached_window.loc[cached_window["appid"].isin(filtered_ids)]
+            full_stats = cached_stats.loc[cached_stats["appid"].isin(filtered_ids)]
+        candidates = rank_stats(full_stats, rank_by, minimum_months)
 
-    with st.sidebar:
-        if select_mode == "Manual search":
+        if select_mode == "Starter comparison":
+            ids = starter_selection(candidates)
+            st.caption("Example games are picked from available records in this window. "
+                       "Try clicking **Customize these games** to add another title.")
+        elif select_mode == "Choose games":
             valid_ids = set(full_stats.loc[full_stats["months"] >= 2, "appid"].astype(int))
             opts = sorted(valid_ids & set(filtered_games.index),
                           key=lambda i: (str(games.loc[i, "game_name"]).casefold(), i))
-            favorites = [578080, 271590, 730, 570, 252490]
-            defaults = [x for x in favorites if x in opts][:5] or opts[:3]
-            ids = st.multiselect(
-                "Search and select up to 10 games", options=opts, default=defaults,
-                format_func=lambda i: str(games.loc[i, "display"]), max_selections=10,
-            )
-        else:
-            if select_mode == "Genre leaders" and genre == "All genres":
-                st.warning("Choose a specific Genre above to see its leaders.")
-                ids = []
+            defaults = starter_selection(candidates)
+            if "manual_selected_games" not in st.session_state:
+                st.session_state["manual_selected_games"] = defaults
             else:
-                limit = 10 if select_mode == "Top 10" else 5
-                ids = candidates.head(limit)["appid"].astype(int).tolist()
-        st.caption(f"{len(filtered_games):,} games match metadata filters · {len(candidates):,} have comparable observations")
+                # Drop selections excluded by a changed genre, date window or publisher.
+                st.session_state["manual_selected_games"] = [
+                    i for i in st.session_state["manual_selected_games"] if i in valid_ids
+                ][:10]
+            ids = st.multiselect(
+                "Add games to compare (search name or AppID; max 10)", options=opts,
+                format_func=lambda i: str(games.loc[i, "display"]),
+                max_selections=10, key="manual_selected_games",
+                placeholder="Type a title, then choose another to compare...",
+            )
+            st.caption(f"{len(ids)} of 10 games selected · Use the × on a selected title to remove it.")
+        elif select_mode == "Genre leaders" and genre == "All genres":
+            st.info("Choose a specific Genre above to view its top-ranked games.")
+            ids = []
+        else:
+            limit = 10 if select_mode == "Top 10" else 5
+            ids = candidates.head(limit)["appid"].astype(int).tolist()
+
+        if ids and select_mode != "Choose games":
+            st.button("Customize these games · add or remove titles",
+                      on_click=open_manual_comparison, args=(ids,),
+                      help="Switches to custom selection while keeping the current games.")
+        st.caption(f"{len(filtered_games):,} games match metadata filters · "
+                   f"{len(candidates):,} have enough observations for ranking")
+
+    with st.sidebar:
         if ids:
             focus_options = [None] + ids
-            focus = st.selectbox("Emphasize a game", focus_options, format_func=lambda i: "All selected" if i is None else str(games.loc[i, "game_name"]))
+            focus = st.selectbox("Emphasize a game", focus_options,
+                                 format_func=lambda i: "All selected" if i is None else str(games.loc[i, "game_name"]))
         else:
             focus = None
 
@@ -659,6 +824,10 @@ if page == "Monthly Trends":
     if not ids:
         st.warning("No games match this selection. Try another genre, window, or ranking.")
         st.stop()
+
+    cover_note = coverage_message(full_stats, ids, alignment, end_month)
+    if cover_note:
+        st.warning(cover_note, icon="📅")
 
     selected_stats = full_stats.loc[full_stats["appid"].isin(ids)].copy()
     strongest = selected_stats.loc[selected_stats["peak_ccu"].idxmax()] if len(selected_stats) else None
@@ -686,13 +855,27 @@ if page == "Monthly Trends":
         if (alignment != "Calendar months" and measure == "Share of observed peak (%)"
                 and genre != "All genres"):
             benchmark = genre_benchmark(window_data, full_stats, measure, minimum_months)
-            st.caption(f"Genre benchmark: {genre} · median and 25th–75th percentile; at least 3 games per month")
-        fig = line_plot(grid, games, ids, alignment, measure, focus, benchmark)
+
+        chart_layout = st.radio(
+            "Chart layout",
+            ["One chart", "Small multiples"], horizontal=True,
+            index=1 if len(ids) >= 7 else 0,
+            help="Small multiples separate each game. With percentage units, every panel uses the same 0–100% scale.",
+        )
+        if chart_layout == "Small multiples":
+            fig = small_multiple_plot(grid, games, ids, alignment, measure)
+            if benchmark is not None:
+                st.caption("Switch to One chart to overlay the Genre median and interquartile band.")
+        else:
+            fig = line_plot(grid, games, ids, alignment, measure, focus, benchmark)
+            if benchmark is not None:
+                st.caption(f"Genre benchmark: {genre} · median and 25th–75th percentile; at least 3 games per month")
         st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
         st.caption(
-            "Relative mode scales each game to its highest monthly average within this chosen window. "
-            "CCU is concurrent activity, not unique-player retention. "
-            "Missing months are shown as gaps; observations are not interpolated."
+            "How to read this: 100% = that game's highest observed monthly average CCU in the selected "
+            "window. 40% means 60% below that peak, not 40% of individual players retained. "
+            "Hover for actual CCU, release dates and data coverage. "
+            "Missing months remain gaps; no values are interpolated."
         )
 
     left, right = st.columns(2, gap="medium")
@@ -718,7 +901,9 @@ if page == "Monthly Trends":
         table = selected_stats.copy()
         table["Game"] = table["appid"].map(games["game_name"])
         table["Genres"] = table["appid"].map(games["genres"]).fillna("")
-        table = table[["Game", "appid", "Genres", "months", "first_month", "last_month", "peak_ccu", "mean_ccu", "end_to_peak_pct", "largest_monthly_decline_pct"]]
+        table["Release date"] = table["appid"].map(lambda i: release_label(games, int(i)))
+        table["Data coverage"] = table["first_month"].astype(str) + " to " + table["last_month"].astype(str)
+        table = table[["Game", "appid", "Genres", "Release date", "Data coverage", "months", "first_month", "last_month", "peak_ccu", "mean_ccu", "end_to_peak_pct", "largest_monthly_decline_pct"]]
         table = table.rename(columns={
             "appid": "AppID", "months": "Observed months", "first_month": "First month",
             "last_month": "Last month", "peak_ccu": "Peak CCU", "mean_ccu": "Avg CCU",
@@ -756,6 +941,16 @@ if page == "Monthly Trends":
                 hide_index=True, width="stretch",
             )
 
+    with st.expander("Why did player counts spike or fall?", expanded=False):
+        st.markdown(
+            "The chart shows **when** CCU changed, but our dataset does not include game updates, "
+            "sales, marketing campaigns or player demographics. Peaks may coincide with "
+            "events such as releases, promotions or holidays; those are **possible explanations, "
+            "not verified causes**. Hover for an exact observation month, then use "
+            "official patch notes or event records to investigate the date. "
+            "We do not generate speculative annotations or forecasts."
+        )
+
     with st.expander("Methodology & known limitations", expanded=False):
         st.markdown(
             "- **Observed peak CCU** is the maximum monthly peak in the available window.\n"
@@ -788,16 +983,20 @@ else:
     if not candidate_ids:
         candidate_ids = games.index.tolist()
     candidate_ids = sorted(candidate_ids, key=lambda i: str(games.loc[i, "game_name"]).casefold())
+    st.markdown("#### Find a game for daily analysis")
+    st.caption("Search the game list below. The daily dataset covers 2017–2020, not necessarily launch dates.")
+    default_id = 570 if 570 in candidate_ids else candidate_ids[0]
+    chosen_id = st.selectbox(
+        "Search game name or AppID", options=candidate_ids,
+        index=candidate_ids.index(default_id),
+        format_func=lambda i: str(games.loc[i, "display"]),
+    )
+    st.caption(f"Recorded release date: {release_label(games, chosen_id)} · "
+               f"Historical name: {str(games.loc[chosen_id, 'mendeley_name']) or 'Unknown'}")
     with st.sidebar:
         st.markdown("#### Daily detail")
-        default_id = 570 if 570 in candidate_ids else candidate_ids[0]
-        chosen_id = st.selectbox(
-            "Search for a game", options=candidate_ids,
-            index=candidate_ids.index(default_id),
-            format_func=lambda i: str(games.loc[i, "display"]),
-        )
         day_measure = st.selectbox("Daily metric", ["Daily average CCU", "Daily observed peak CCU"])
-        daily_units = st.radio("Daily chart units", ["CCU (absolute)", "Relative to peak (%)"], horizontal=True)
+        daily_units = st.radio("Daily chart units", ["CCU (absolute)", "Relative to peak (%)"], horizontal=False)
         coverage_only = st.checkbox("Only ≥70% covered days", value=True)
 
     try:
