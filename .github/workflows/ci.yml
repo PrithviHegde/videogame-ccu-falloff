@@ -1,0 +1,21 @@
+name: Tests
+
+# Runs the test suite on every pull request, so we know a change
+# doesn't break the app before it is merged (and deployed).
+on:
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Run tests
+        run: pytest
