@@ -10,4 +10,8 @@ __pycache__/
 .ipynb_checkpoints/
 .streamlit/secrets.toml
 Data/
+# Raw downloads (e.g. SteamDB chart exports) stay local; only processed/ is published.
+data/raw/
+*.xls
+.DS_Store
 backup_before_extension_*/
