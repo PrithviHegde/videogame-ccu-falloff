@@ -22,12 +22,17 @@ def test_monthly_trends_loads():
     at = AppTest.from_file(APP_FILE, default_timeout=120).run()
     assert_healthy(at)
     assert at.sidebar.radio[0].value == "Monthly Trends"
+    # Default view: months since release, first 6 months.
+    compare_by = next(r for r in at.sidebar.radio if r.label == "Compare by")
+    assert compare_by.value == "Months since release"
+    window = next(s for s in at.sidebar.select_slider if s.label == "Months from release")
+    assert window.value == 6
 
 
-def test_months_since_release_loads():
+def test_calendar_months_loads():
     at = AppTest.from_file(APP_FILE, default_timeout=120).run()
     compare_by = next(r for r in at.sidebar.radio if r.label == "Compare by")
-    compare_by.set_value("Months since release").run()
+    compare_by.set_value("Calendar months").run()
     assert_healthy(at)
 
 

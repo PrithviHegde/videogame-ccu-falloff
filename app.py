@@ -62,6 +62,20 @@ GAMES_PATH = preferred_file("steam_games")
 MONTHLY_PATH = preferred_file("steam_monthly")
 DAILY_PATH = preferred_file("steam_daily")
 
+# The data files hold ~7,000 games. The app shows only this short list of
+# well-known titles. Set FEATURED_APPIDS = None to show every game again.
+FEATURED_APPIDS = [
+    489830,  # The Elder Scrolls V: Skyrim Special Edition
+    292030,  # The Witcher 3: Wild Hunt
+    377160,  # Fallout 4
+    374320,  # Dark Souls III
+    271590,  # Grand Theft Auto V
+]
+# Titles that are wrong in the source metadata.
+NAME_OVERRIDES = {
+    292030: "The Witcher 3: Wild Hunt",  # listed under its Chinese title
+}
+
 INK = "#253249"
 MUTED = "#7B8698"
 GRID = "#E8ECF2"
@@ -163,11 +177,14 @@ def load_monthly(games_file: str, monthly_file: str, games_mtime: int, monthly_m
     games = games.dropna(subset=["appid"]).copy()
     games["appid"] = games["appid"].astype("int64")
     games = games.drop_duplicates("appid")
+    if FEATURED_APPIDS is not None:
+        games = games.loc[games["appid"].isin(FEATURED_APPIDS)].copy()
     for col in ("genres", "publishers", "mendeley_name"):
         if col not in games.columns:
             games[col] = ""
         games[col] = games[col].fillna("").astype(str)
     games["game_name"] = games["game_name"].fillna("Unknown").astype(str)
+    games["game_name"] = games["appid"].map(NAME_OVERRIDES).fillna(games["game_name"])
     games["release_dt"] = pd.to_datetime(games["release_date"], errors="coerce")
     games["release_ord"] = (
         games["release_dt"].dt.year * 12 + games["release_dt"].dt.month
@@ -189,9 +206,10 @@ def load_monthly(games_file: str, monthly_file: str, games_mtime: int, monthly_m
     first_month = monthly.groupby("appid")["month_ordinal"].min()
     games["first_month_ordinal"] = first_month
     games["first_release_offset"] = games["first_month_ordinal"] - games["release_ord"]
-    # Release-aligned means first observation is in release month or the next.
+    # Release-aligned means first observation is between the month before release
+    # (e.g. Skyrim SE has one pre-release month with ~1 player) and the month after.
     # Excludes old games first observed years after launch, or ambiguous EA history.
-    games["launch_comparable"] = games["first_release_offset"].between(0, 1)
+    games["launch_comparable"] = games["first_release_offset"].between(-1, 1)
     monthly["release_month_index"] = monthly["month_ordinal"] - monthly["appid"].map(games["release_ord"])
     monthly["launch_comparable"] = monthly["appid"].map(games["launch_comparable"]).fillna(False)
     return games, monthly
@@ -699,6 +717,7 @@ if page == "Monthly Trends":
     with st.sidebar:
         st.markdown("#### Time axis")
         alignment = st.radio("Compare by", ["Calendar months", "Months since release"],
+                             index=1,
                              help="Calendar time shows real dates; release alignment uses months since a known release date.")
         if alignment == "Calendar months":
             start_month, end_month = st.select_slider(
@@ -708,7 +727,7 @@ if page == "Monthly Trends":
             release_window = 12
             minimum_months = 3
         else:
-            release_window = st.select_slider("Months from release", options=[3, 6, 12, 24], value=12)
+            release_window = st.select_slider("Months from release", options=[3, 6, 12, 24], value=6)
             minimum_months = max(2, math.ceil(release_window * .5))
             start_month, end_month = all_months[0], all_months[-1]
             st.caption("Only games observed beginning in release month or the next month qualify.")
