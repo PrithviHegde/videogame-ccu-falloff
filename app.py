@@ -27,10 +27,17 @@ st.set_page_config(
     page_title="Steam Player Observatory | DATA 511",
     page_icon="🎮",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 DATA_PATH = Path(__file__).resolve().parent / "processed" / "launch_daily.parquet"
+INFO_PATH = Path(__file__).resolve().parent / "data" / "game_info.csv"
+NOT_GENRES = {"Free To Play", "Early Access"}   # business models, not genres
+MODES = ["Single-player", "Multiplayer", "Both"]
+ANY_GENRE, ANY_TYPE, ANY_PUBLISHER = "All genres", "All game types", "All publishers"
+GAME_TYPES = [ANY_TYPE, "Single-player", "Multiplayer"]
+PRICE_PAD, YEAR_PAD = 10, 2   # how far snapped filters reach beyond the picked games
+REVIEWED = {"yes", "y", "true", "1", "x", "✓", "✔", "ok", "looks good"}   # "Looks Good?" answers
 
 MAX_DAYS = 180           # data loaded and plotted; the slider zooms within it
 MIN_DAYS = 14
@@ -64,7 +71,6 @@ st.markdown(
     <style>
     [data-testid="stApp"], [data-testid="stAppViewContainer"]{background:#F9FAFB;color:#253249}
     [data-testid="stHeader"]{background:transparent}
-    [data-testid="stSidebarCollapsedControl"]{display:none}
     .block-container{max-width:1200px;padding-top:2rem;padding-bottom:3rem}
     h1,h2,h3,h4{color:#253249!important;letter-spacing:-.03em}
     div[data-testid="stVerticalBlockBorderWrapper"]{
@@ -87,6 +93,9 @@ st.markdown(
     .op-arrow{align-self:center;color:#B7C0CD;font-size:1.2rem}
     .op-pattern{font-size:.9rem;color:#5F6D82;margin:0 0 8px}
     .op-pattern b{color:#27364E}
+    .op-meta{font-size:.8rem;color:#8793A3;margin:-4px 0 10px}
+    section[data-testid="stSidebar"]{background:#F2F4F8;border-right:1px solid #E3E7EE}
+    .op-side{font-size:.72rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase;color:#798BB0;margin:0 0 4px}
     @media (max-width:640px){.op-arrow{display:none}}
     </style>
     """,
@@ -120,6 +129,125 @@ def load_data(mtime: int) -> pd.DataFrame:
     # Keep the game order from build_launch_data.GAMES (first game = default).
     df["order"] = df.groupby("appid", sort=False).ngroup()
     return add_smoothing(df).sort_values(["order", "day"]).reset_index(drop=True)
+
+
+def split_list(value) -> list[str]:
+    """'Action|RPG' -> ['Action', 'RPG']; blank -> []."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
+    return [part.strip() for part in str(value).split("|") if part.strip()]
+
+
+def prepare_info(info: pd.DataFrame) -> pd.DataFrame:
+    """Game details for the filters, indexed by AppID.
+
+    genres_override (filled by hand) replaces Steam's genres when it's set.
+    "Free To Play" and "Early Access" are dropped: they're business models,
+    not genres (free games are found with the launch-price filter).
+    """
+    info = info.copy()
+    override = info.get("genres_override", pd.Series(index=info.index, dtype=object))
+    genres = override.where(override.map(lambda v: bool(split_list(v))), info["genres"])
+    info["genre_list"] = genres.map(lambda v: [g for g in split_list(v) if g not in NOT_GENRES])
+    info["publisher_list"] = info["publishers"].map(split_list)
+    info["year"] = pd.to_datetime(info["release_date"]).dt.year
+    info["launch_price_usd"] = pd.to_numeric(info["launch_price_usd"], errors="coerce")
+    # Ticked off in the team's review sheet ("Looks Good?" column).
+    looks_good = info.get("Looks Good?", pd.Series(index=info.index, dtype=object))
+    info["reviewed"] = looks_good.map(lambda v: str(v).strip().casefold() in REVIEWED)
+    return info.set_index("appid")
+
+
+@st.cache_data(show_spinner=False)
+def load_info(mtime: int | None) -> pd.DataFrame:
+    """data/game_info.csv, prepared for filtering; empty if the file is missing."""
+    if mtime is None:
+        return pd.DataFrame()
+    return prepare_info(pd.read_csv(INFO_PATH))
+
+
+def filter_games(info: pd.DataFrame, genres=(), publishers=(), modes=(),
+                 years: tuple | None = None, prices: tuple | None = None) -> set[int]:
+    """AppIDs matching every active filter. A game matches a genre or publisher
+    filter if it has any of the chosen ones. None or empty = filter not used."""
+    keep = pd.Series(True, index=info.index)
+    if genres:
+        keep &= info["genre_list"].map(lambda gs: bool(set(gs) & set(genres)))
+    if publishers:
+        keep &= info["publisher_list"].map(lambda ps: bool(set(ps) & set(publishers)))
+    if modes:
+        keep &= info["main_mode"].isin(modes)
+    if years:
+        keep &= info["year"].between(*years)
+    if prices:
+        keep &= info["launch_price_usd"].between(*prices)   # unknown price: excluded
+    return set(info.index[keep])
+
+
+def game_meta(info: pd.DataFrame, appid: int) -> str:
+    """'Action, RPG · FromSoftware, Inc., Bandai Namco · $59.99 at launch · Single-player · 2022'."""
+    if appid not in info.index:
+        return ""
+    row = info.loc[appid]
+    price = row["launch_price_usd"]
+    parts = [
+        ", ".join(row["genre_list"]),
+        ", ".join(row["publisher_list"]),
+        "" if pd.isna(price) else ("Free to play" if price == 0 else f"${price:,.2f} at launch"),
+        row["main_mode"] if isinstance(row["main_mode"], str) else "",
+        str(row["year"]),
+        "" if row["reviewed"] else "not yet reviewed",
+    ]
+    return " · ".join(p for p in parts if p)
+
+
+def snap_filters(info: pd.DataFrame, selected: list[int], price_span: tuple,
+                 year_span: tuple) -> dict:
+    """Filter values that frame the selected games, so the game list shows similar ones.
+
+    - Launch price and release year: the selected games' range, widened by
+      PRICE_PAD dollars and YEAR_PAD years (one game alone would otherwise
+      leave a single price and year, i.e. nothing else to add).
+    - Genre: one all selected games share; the most common one if several
+      (so "games like Elden Ring" means the RPGs, not just Action games).
+    - Game type: Single-player or Multiplayer if every selected game fits it
+      ("Both" fits either).
+    - Publisher: only when 2+ games are selected and share one.
+    Anything the selection doesn't share stays at "All".
+    """
+    out = {"f_price": tuple(price_span), "f_year": tuple(year_span), "f_genre": ANY_GENRE,
+           "f_mode": ANY_TYPE, "f_publisher": ANY_PUBLISHER}
+    sel = info.loc[[i for i in selected if i in info.index]]
+    if sel.empty:
+        return out
+
+    prices = sel["launch_price_usd"]
+    if prices.notna().all():
+        lo = max(price_span[0], int(math.floor((prices.min() - PRICE_PAD) / 5) * 5))
+        hi = min(price_span[1], int(math.ceil((prices.max() + PRICE_PAD) / 5) * 5))
+        out["f_price"] = (lo, hi)
+    out["f_year"] = (max(year_span[0], int(sel["year"].min()) - YEAR_PAD),
+                     min(year_span[1], int(sel["year"].max()) + YEAR_PAD))
+
+    def most_common(shared: set, column: str) -> str:
+        return max(sorted(shared), key=lambda v: sum(v in vs for vs in info[column]))
+
+    shared_genres = set.intersection(*(set(g) for g in sel["genre_list"]))
+    if shared_genres:
+        out["f_genre"] = most_common(shared_genres, "genre_list")
+
+    modes = sel["main_mode"]
+    if modes.notna().all():
+        found = set(modes)
+        for mode in ("Single-player", "Multiplayer"):
+            if mode in found and found <= {mode, "Both"}:
+                out["f_mode"] = mode
+
+    if len(sel) >= 2:
+        shared_publishers = set.intersection(*(set(p) for p in sel["publisher_list"]))
+        if shared_publishers:
+            out["f_publisher"] = most_common(shared_publishers, "publisher_list")
+    return out
 
 
 def leveling_off_day(smooth: pd.Series) -> int | None:
@@ -514,7 +642,7 @@ SHAPE_BLURB = {
 }
 
 
-def stage_cards(s: dict, accent: str) -> str:
+def stage_cards(s: dict, accent: str, meta: str = "") -> str:
     """The game's shape, then three cards in reading order."""
     def card(step: str, big: str, small: str, color: str) -> str:
         return (f'<div class="op-card" style="--accent:{color}"><div class="op-step">{step}</div>'
@@ -522,7 +650,8 @@ def stage_cards(s: dict, accent: str) -> str:
 
     arrow = '<div class="op-arrow">→</div>'
     pattern = (f'<div class="op-pattern"><b>{SHAPE_ICON[s["shape"]]} {s["shape"]}</b> · '
-               f'{SHAPE_BLURB[s["shape"]]}</div>')
+               f'{SHAPE_BLURB[s["shape"]]}</div>'
+               + (f'<div class="op-meta">{escape(meta)}</div>' if meta else ""))
     d = s["peak_date"]
     end_small = f"{vs_launch_text(s['end_vs_launch'])}, average of days {s['tail_start']}–{s['last_day']}"
 
@@ -567,15 +696,105 @@ game_ids = list(names)
 colors = {appid: PALETTE[i % len(PALETTE)] for i, appid in enumerate(game_ids)}
 stages = {appid: game_stages(data.loc[data["appid"].eq(appid)]) for appid in game_ids}
 
+info = load_info(INFO_PATH.stat().st_mtime_ns if INFO_PATH.is_file() else None)
+FILTER_KEYS = ["f_price", "f_year", "f_genre", "f_mode", "f_publisher"]
+
+
+def clear_filters() -> None:
+    for key in FILTER_KEYS:
+        st.session_state.pop(key, None)
+
+
+def mark(label: str, changed: bool) -> str:
+    """A colored dot on a filter's label while it's off its default."""
+    return f"{label} :red[●]" if changed else label
+
+
+if len(info):
+    sub = info.loc[[i for i in game_ids if i in info.index]]
+    all_genres = sorted({g for gs in sub["genre_list"] for g in gs})
+    all_publishers = sorted({p for ps in sub["publisher_list"] for p in ps}, key=str.casefold)
+    year_span = (int(sub["year"].min()), int(sub["year"].max()))
+    top_price = sub["launch_price_usd"].max()
+    price_span = (0, int(math.ceil((top_price if pd.notna(top_price) else 70) / 10) * 10))
+
+
+def follow_selection() -> None:
+    """When games are picked or removed, move the filters to frame them."""
+    picked = st.session_state.get("games")
+    if picked and len(info):
+        st.session_state.update(snap_filters(sub, picked, price_span, year_span))
+
+
+if "games" not in st.session_state:          # first load: default game, filters framing it
+    st.session_state["games"] = game_ids[:1]
+    follow_selection()
+
+# ---- Sidebar: filters (as in the design sketches) ----
+shown = game_ids
+with st.sidebar:
+    st.markdown('<div class="op-side">Filters</div>', unsafe_allow_html=True)
+    if len(info):
+        state = st.session_state
+        changed = {
+            "f_price": tuple(state.get("f_price", price_span)) != price_span,
+            "f_year": tuple(state.get("f_year", year_span)) != year_span,
+            "f_genre": state.get("f_genre", ANY_GENRE) != ANY_GENRE,
+            "f_mode": state.get("f_mode", ANY_TYPE) != ANY_TYPE,
+            "f_publisher": state.get("f_publisher", ANY_PUBLISHER) != ANY_PUBLISHER,
+        }
+        prices = st.slider(mark("Launch price", changed["f_price"]), *price_span,
+                           **({} if "f_price" in state else {"value": price_span}),
+                           step=5, key="f_price", format="$%d",
+                           help="Price on Steam at release; $0 = free to play.")
+        years = st.slider(mark("Release year", changed["f_year"]), *year_span,
+                          **({} if "f_year" in state else {"value": year_span}), key="f_year")
+        genre = st.selectbox(mark("Genre", changed["f_genre"]), [ANY_GENRE] + all_genres,
+                             key="f_genre")
+        game_type = st.selectbox(mark("Game type", changed["f_mode"]), GAME_TYPES, key="f_mode",
+                                 help="The game's main way to play, checked by the team. "
+                                      "Games that are both count in either.")
+        publisher = st.radio(mark("Publisher", changed["f_publisher"]),
+                             [ANY_PUBLISHER] + all_publishers, key="f_publisher")
+        active = sum(changed.values())
+        st.button("Clear filters" + (f" ({active})" if active else ""), on_click=clear_filters,
+                  disabled=not active, width="stretch")
+        unreviewed = int((~sub["reviewed"]).sum())
+        if unreviewed:
+            st.caption(f"⚠️ Launch prices and game types are drafts: the team has "
+                       f"checked {len(sub) - unreviewed} of {len(sub)} games so far.")
+        if active:
+            allowed = filter_games(
+                sub,
+                genres=[genre] if changed["f_genre"] else (),
+                publishers=[publisher] if changed["f_publisher"] else (),
+                modes=[game_type, "Both"] if changed["f_mode"] else (),
+                years=years if changed["f_year"] else None,
+                prices=prices if changed["f_price"] else None,
+            )
+            shown = [i for i in game_ids if i in allowed]
+
+# ---- Game picker and chart controls ----
 with st.container(border=True):
+    # Keep the picked games that still match; if the filters removed all of
+    # them, start from the first match instead of an empty chart.
+    picked = st.session_state.get("games") or []
+    kept = [g for g in picked if g in shown]
+    st.session_state["games"] = kept if kept or not picked else shown[:1]
     ids = st.multiselect(
-        "Games", options=game_ids, default=game_ids[:1], format_func=names.get,
-        placeholder="Add a game to compare…",
+        "Games", options=shown, key="games", format_func=names.get, on_change=follow_selection,
+        placeholder="Search for a game to add…" if shown else "No games match the filters",
+        help="Type to search. Pick several games to compare them. The filters on the left "
+             "move to match the games you pick, so this list shows similar games.",
     )
+    st.caption(f"Showing {len(shown)} of {len(game_ids)} games: the filters on the left follow "
+               f"your picks. Use “Clear filters” to see every game." if len(shown) < len(game_ids)
+               else f"All {len(game_ids)} games available.")
+
     left, mid, right = st.columns([2, 1, 1], gap="large")
     with left:
         days = st.slider("Days after release", min_value=MIN_DAYS, max_value=MAX_DAYS,
-                         value=MAX_DAYS, step=1)
+                         value=MAX_DAYS, step=1, key="days")
     with mid:
         units = st.radio("Show", [PCT, PLAYERS], horizontal=True,
                          help="% of peak puts games of different sizes on the same scale: "
@@ -585,13 +804,15 @@ with st.container(border=True):
                         format_func=lambda a: "Since release" if a == SINCE_RELEASE else "Calendar")
 
 if not ids:
-    st.info("Pick at least one game above.")
+    st.info("Pick at least one game above." if shown
+            else "No games match these filters. Try removing one, or click “Clear filters”.")
     st.stop()
 
 ids = [i for i in game_ids if i in ids]  # keep a stable order and colors
 
 if len(ids) == 1:
-    st.markdown(stage_cards(stages[ids[0]], colors[ids[0]]), unsafe_allow_html=True)
+    st.markdown(stage_cards(stages[ids[0]], colors[ids[0]], game_meta(info, ids[0]) if len(info) else ""),
+                unsafe_allow_html=True)
 
 with st.container(border=True):
     layout = "One chart"
