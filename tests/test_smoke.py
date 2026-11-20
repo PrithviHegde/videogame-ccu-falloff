@@ -65,18 +65,30 @@ def test_no_games_selected():
 
 def test_filters_narrow_the_game_list():
     at = open_app()
-    at.multiselect(key="f_mode").set_value(["Multiplayer"]).run()
+    at.selectbox(key="f_mode").set_value("Multiplayer").run()
     assert_healthy(at)
     options = at.multiselect(key="games").options
     assert 0 < len(options) < len(ALL_GAMES) + 20
     assert all(name not in options for name in ("Elden Ring", "Skyrim"))
+    assert "Factorio" in options                  # "Both" counts as multiplayer too
     assert at.multiselect(key="games").value      # a matching game is picked, not an empty chart
+
+
+def test_genre_and_publisher_filters():
+    at = open_app()
+    at.selectbox(key="f_genre").set_value("Sports").run()
+    assert at.multiselect(key="games").options == ["Rocket League"]
+    at.selectbox(key="f_genre").set_value("All genres").run()
+    at.radio(key="f_publisher").set_value("Bethesda Softworks").run()
+    assert_healthy(at)
+    assert "Fallout 4" in at.multiselect(key="games").options
+    assert "Elden Ring" not in at.multiselect(key="games").options
 
 
 def test_filters_with_no_match_and_clear():
     at = open_app()
     at.slider(key="f_price").set_value((0, 0)).run()            # free games only
-    at.multiselect(key="f_mode").set_value(["Single-player"]).run()
+    at.selectbox(key="f_mode").set_value("Single-player").run()
     assert_healthy(at)
     assert not at.multiselect(key="games").options
     assert any("No games match" in i.value for i in at.info)

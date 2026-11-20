@@ -27,7 +27,7 @@ st.set_page_config(
     page_title="Steam Player Observatory | DATA 511",
     page_icon="🎮",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 DATA_PATH = Path(__file__).resolve().parent / "processed" / "launch_daily.parquet"
@@ -68,7 +68,6 @@ st.markdown(
     <style>
     [data-testid="stApp"], [data-testid="stAppViewContainer"]{background:#F9FAFB;color:#253249}
     [data-testid="stHeader"]{background:transparent}
-    [data-testid="stSidebarCollapsedControl"]{display:none}
     .block-container{max-width:1200px;padding-top:2rem;padding-bottom:3rem}
     h1,h2,h3,h4{color:#253249!important;letter-spacing:-.03em}
     div[data-testid="stVerticalBlockBorderWrapper"]{
@@ -92,6 +91,8 @@ st.markdown(
     .op-pattern{font-size:.9rem;color:#5F6D82;margin:0 0 8px}
     .op-pattern b{color:#27364E}
     .op-meta{font-size:.8rem;color:#8793A3;margin:-4px 0 10px}
+    section[data-testid="stSidebar"]{background:#F2F4F8;border-right:1px solid #E3E7EE}
+    .op-side{font-size:.72rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase;color:#798BB0;margin:0 0 4px}
     @media (max-width:640px){.op-arrow{display:none}}
     </style>
     """,
@@ -644,7 +645,9 @@ colors = {appid: PALETTE[i % len(PALETTE)] for i, appid in enumerate(game_ids)}
 stages = {appid: game_stages(data.loc[data["appid"].eq(appid)]) for appid in game_ids}
 
 info = load_info(INFO_PATH.stat().st_mtime_ns if INFO_PATH.is_file() else None)
-FILTER_KEYS = ["f_genre", "f_publisher", "f_mode", "f_year", "f_price"]
+ANY_GENRE, ANY_TYPE, ANY_PUBLISHER = "All genres", "All game types", "All publishers"
+GAME_TYPES = [ANY_TYPE, "Single-player", "Multiplayer"]
+FILTER_KEYS = ["f_price", "f_year", "f_genre", "f_mode", "f_publisher"]
 
 
 def clear_filters() -> None:
@@ -652,8 +655,15 @@ def clear_filters() -> None:
         st.session_state.pop(key, None)
 
 
-with st.container(border=True):
-    shown = game_ids
+def mark(label: str, changed: bool) -> str:
+    """A colored dot on a filter's label while it's off its default."""
+    return f"{label} :red[●]" if changed else label
+
+
+# ---- Sidebar: filters, then the title search (as in the design sketches) ----
+shown = game_ids
+with st.sidebar:
+    st.markdown('<div class="op-side">Filters</div>', unsafe_allow_html=True)
     if len(info):
         sub = info.loc[[i for i in game_ids if i in info.index]]
         all_genres = sorted({g for gs in sub["genre_list"] for g in gs})
@@ -662,37 +672,43 @@ with st.container(border=True):
         top_price = sub["launch_price_usd"].max()
         price_span = (0, int(math.ceil((top_price if pd.notna(top_price) else 70) / 10) * 10))
         state = st.session_state
-        active = sum([
-            bool(state.get("f_genre")), bool(state.get("f_publisher")), bool(state.get("f_mode")),
-            tuple(state.get("f_year", year_span)) != year_span,
-            tuple(state.get("f_price", price_span)) != price_span,
-        ])
-        title = "Filter the game list" + (f" · {active} active" if active else "")
-        with st.expander(title, expanded=bool(active)):
-            c1, c2, c3 = st.columns(3)
-            genres = c1.multiselect("Genre", all_genres, key="f_genre", placeholder="Any genre")
-            publishers = c2.multiselect("Publisher", all_publishers, key="f_publisher",
-                                        placeholder="Any publisher")
-            modes = c3.multiselect("Players", MODES, key="f_mode", placeholder="Any",
-                                   help="The game's main way to play, checked by the team "
-                                        "(Steam tags many single-player games as multiplayer too).")
-            c4, c5, c6 = st.columns([2, 2, 1], vertical_alignment="bottom")
-            years = c4.slider("Release year", *year_span, value=year_span, key="f_year")
-            prices = c5.slider("Launch price (USD)", *price_span, value=price_span, step=5,
-                               key="f_price", format="$%d", help="Price on Steam at release; $0 = free.")
-            c6.button("Clear filters", on_click=clear_filters, disabled=not active,
-                      width="stretch")
-            unreviewed = int((~sub["reviewed"]).sum())
-            if unreviewed:
-                st.caption(f"⚠️ Launch prices and single/multiplayer are drafts: the team has "
-                           f"checked {len(sub) - unreviewed} of {len(sub)} games so far.")
+        changed = {
+            "f_price": tuple(state.get("f_price", price_span)) != price_span,
+            "f_year": tuple(state.get("f_year", year_span)) != year_span,
+            "f_genre": state.get("f_genre", ANY_GENRE) != ANY_GENRE,
+            "f_mode": state.get("f_mode", ANY_TYPE) != ANY_TYPE,
+            "f_publisher": state.get("f_publisher", ANY_PUBLISHER) != ANY_PUBLISHER,
+        }
+        prices = st.slider(mark("Launch price", changed["f_price"]), *price_span, value=price_span,
+                           step=5, key="f_price", format="$%d",
+                           help="Price on Steam at release; $0 = free to play.")
+        years = st.slider(mark("Release year", changed["f_year"]), *year_span, value=year_span,
+                          key="f_year")
+        genre = st.selectbox(mark("Genre", changed["f_genre"]), [ANY_GENRE] + all_genres,
+                             key="f_genre")
+        game_type = st.selectbox(mark("Game type", changed["f_mode"]), GAME_TYPES, key="f_mode",
+                                 help="The game's main way to play, checked by the team. "
+                                      "Games that are both count in either.")
+        publisher = st.radio(mark("Publisher", changed["f_publisher"]),
+                             [ANY_PUBLISHER] + all_publishers, key="f_publisher")
+        active = sum(changed.values())
+        st.button("Clear filters" + (f" ({active})" if active else ""), on_click=clear_filters,
+                  disabled=not active, width="stretch")
+        unreviewed = int((~sub["reviewed"]).sum())
+        if unreviewed:
+            st.caption(f"⚠️ Launch prices and game types are drafts: the team has "
+                       f"checked {len(sub) - unreviewed} of {len(sub)} games so far.")
         if active:
             allowed = filter_games(
-                sub, genres, publishers, modes,
-                years=years if tuple(years) != year_span else None,
-                prices=prices if tuple(prices) != price_span else None,
+                sub,
+                genres=[genre] if changed["f_genre"] else (),
+                publishers=[publisher] if changed["f_publisher"] else (),
+                modes=[game_type, "Both"] if changed["f_mode"] else (),
+                years=years if changed["f_year"] else None,
+                prices=prices if changed["f_price"] else None,
             )
             shown = [i for i in game_ids if i in allowed]
+        st.divider()
 
     # Keep the picked games that still match; if the filters removed all of
     # them, start from the first match instead of an empty chart.
@@ -703,11 +719,15 @@ with st.container(border=True):
         kept = [g for g in picked if g in shown]
         st.session_state["games"] = kept if kept or not picked else shown[:1]
     ids = st.multiselect(
-        "Games", options=shown, key="games", format_func=names.get,
-        placeholder="Add a game to compare…" if shown else "No games match these filters",
+        "Title name", options=shown, key="games", format_func=names.get,
+        placeholder="Search for a game…" if shown else "No games match these filters",
+        help="Type to search. Pick several games to compare them.",
     )
-    if len(shown) < len(game_ids):
-        st.caption(f"{len(shown)} of {len(game_ids)} games match the filters.")
+    st.caption(f"{len(shown)} of {len(game_ids)} games match the filters." if len(shown) < len(game_ids)
+               else f"{len(game_ids)} games available.")
+
+# ---- Chart controls ----
+with st.container(border=True):
     left, mid, right = st.columns([2, 1, 1], gap="large")
     with left:
         days = st.slider("Days after release", min_value=MIN_DAYS, max_value=MAX_DAYS,
