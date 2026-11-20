@@ -16,13 +16,14 @@ An interactive look at the first 180 days after release for well-known Steam gam
 - **Comparisons.** Pick several games and view them on one chart (as % of each game's own peak, so big and small games share a scale) or side by side. A strip under the chart lines up each game's stages.
 - **Controls.** Zoom from 14 to 180 days, switch between % of peak and player counts, and between days since release and calendar dates.
 
-Games currently included: Elden Ring, Cyberpunk 2077, Black Myth: Wukong, Fallout 4, The Elder Scrolls V: Skyrim.
+Games currently included: see `GAMES` in `build_launch_data.py` (19 games at the moment, from Skyrim in 2011 to Oblivion Remastered in 2025).
 
 > CCU counts people playing at the same moment. It is not the number of different players, and not retention.
 
 ## How the falloff stages are found
 
-- **Launch day (day 0)** is the first day that starts three days in a row at 10% or more of the game's highest-ever daily peak. This skips small pre-release counts and one-day glitches. Days are in UTC, so day 0 can be the day after the store's release date.
+- **Day 0** is the game's official release date on its Steam store page. SteamDB counts days in UTC, so when nothing (or almost nothing) was recorded on that date because the game unlocked after midnight UTC, day 0 is the next day.
+- Games are skipped if their SteamDB history starts after the release date, or more than 10 of their first 180 days have no data. `build_launch_data.py` prints which games were skipped and why.
 - **The leveling-off point** is where the decline flattens out: on the 7-day average, the day that sits furthest below a straight line from the peak to day 180 (the "knee" of the curve). Changing the smoothing from 5 to 14 days moves it by a few days at most.
 - Stages are always computed on all 180 days, so they don't move when you zoom.
 
@@ -40,7 +41,7 @@ pytest                    # runs the tests (a few seconds)
 
 1. On SteamDB, open the game's charts page (`https://steamdb.info/app/<appid>/charts/`), set the range to **All**, and export the data. **Download it by hand:** SteamDB does not allow scraping or automated downloads.
 2. Save it as `data/raw/steamdb/steamdb_chart_<appid>.csv` (the default file name). `data/raw/` is ignored by git, so raw downloads are never committed.
-3. Add the game to `GAMES` at the top of `build_launch_data.py`, then run:
+3. Add the game to `GAMES` at the top of `build_launch_data.py`, with its official release date from its Steam store page, then run:
    ```bash
    python build_launch_data.py
    ```
