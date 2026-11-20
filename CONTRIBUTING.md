@@ -57,8 +57,8 @@ pytest
 
 It takes a few seconds. There are two kinds of test in `tests/`:
 
-- `test_smoke.py` opens the real app on both views and checks that nothing crashes.
-- `test_data.py` checks the calculations (cleaning, filtering, statistics, ranking) on small made-up tables.
+- `test_smoke.py` opens the real app, tries the main controls (games, days slider, units, time axis, layouts) and checks that nothing crashes.
+- `test_data.py` checks the calculations (reading SteamDB exports, finding launch day, smoothing, falloff stages) on small made-up tables.
 
 If you add a new calculation, please add a small test for it. If you only change the layout or wording, the existing tests are enough.
 
@@ -70,6 +70,6 @@ If you add a new calculation, please add a small test for it. If you only change
 
 ## Data rules
 
-- Don't commit raw data (`.csv`, `.zip`). Only the compact `.parquet` files in `processed/` belong in the repo. The `.gitignore` already blocks the rest.
-- Don't use data from SteamDB; its policies prohibit scraping. Steam's official Web API and properly licensed datasets are fine.
+- Don't commit raw data (`.csv`, `.xls`, `.zip`). Raw downloads go in `data/raw/`, which git ignores. Only the compact `.parquet` files in `processed/` belong in the repo.
+- Player counts come from SteamDB, **downloaded by hand** from each game's charts page. SteamDB doesn't allow scraping or automated downloads, so never script them. Steam's official Web API and properly licensed datasets are fine.
 - CCU means players online at the same time. It is not unique players or retention, so don't label it that way in the app.
