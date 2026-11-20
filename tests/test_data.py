@@ -241,3 +241,68 @@ def test_compact_numbers(app):
     assert app.compact(1_234) == "1.2k"
     assert app.compact(67_401) == "67k"
     assert app.compact(2_415_714) == "2.4M"
+
+
+# ------------------------------ app: filters ------------------------------
+
+@pytest.fixture
+def info(app):
+    raw = pd.DataFrame({
+        "appid": [1, 2, 3, 4],
+        "game": ["Solo RPG", "Shooter", "Co-op Sim", "Odd Tags"],
+        "release_date": ["2015-11-10", "2020-11-04", "2020-08-14", "2024-12-05"],
+        "genres": ["Action|RPG", "Action|Free To Play", "Simulation|Indie", "Racing|Strategy|Free To Play"],
+        "genres_override": [None, None, "", "Action"],
+        "publishers": ["Big Co|Partner", "Big Co", "Small Studio", "Other"],
+        "main_mode": ["Single-player", "Multiplayer", "Both", "Multiplayer"],
+        "launch_price_usd": [59.99, 0.0, 30.0, None],
+    })
+    return app.prepare_info(raw)
+
+
+def test_prepare_info_genres(app, info):
+    assert info.loc[2, "genre_list"] == ["Action"]          # "Free To Play" is not a genre
+    assert info.loc[3, "genre_list"] == ["Simulation", "Indie"]   # blank override: Steam's genres
+    assert info.loc[4, "genre_list"] == ["Action"]          # override replaces Steam's tags
+    assert info.loc[1, "publisher_list"] == ["Big Co", "Partner"]
+    assert info.loc[1, "year"] == 2015
+
+
+def test_filter_games_no_filters_keeps_everything(app, info):
+    assert app.filter_games(info) == {1, 2, 3, 4}
+
+
+def test_filter_games_genre_and_publisher_match_any(app, info):
+    assert app.filter_games(info, genres=["Action"]) == {1, 2, 4}
+    assert app.filter_games(info, publishers=["Partner", "Small Studio"]) == {1, 3}
+
+
+def test_filter_games_mode_year_price(app, info):
+    assert app.filter_games(info, modes=["Multiplayer"]) == {2, 4}
+    assert app.filter_games(info, years=(2016, 2021)) == {2, 3}
+    assert app.filter_games(info, prices=(0, 0)) == {2}            # free games
+    assert app.filter_games(info, prices=(0, 70)) == {1, 2, 3}     # unknown price is left out
+
+
+def test_filter_games_combines_filters(app, info):
+    assert app.filter_games(info, genres=["Action"], modes=["Single-player"]) == {1}
+
+
+def test_game_meta(app, info):
+    assert app.game_meta(info, 1) == ("Action, RPG · Big Co, Partner · $59.99 at launch · "
+                                      "Single-player · 2015 · not yet reviewed")
+    assert "Free to play" in app.game_meta(info, 2)
+    assert app.game_meta(info, 99) == ""
+
+
+def test_reviewed_flag_from_looks_good_column(app):
+    raw = pd.DataFrame({
+        "appid": [1, 2, 3], "game": ["A", "B", "C"],
+        "release_date": ["2020-01-01"] * 3, "genres": ["RPG"] * 3, "publishers": ["X"] * 3,
+        "main_mode": ["Single-player"] * 3, "launch_price_usd": [10, 10, 10],
+        "Looks Good?": ["Yes", None, "TRUE"],
+    })
+    info = app.prepare_info(raw)
+    assert info["reviewed"].tolist() == [True, False, True]
+    assert app.game_meta(info, 2).endswith("not yet reviewed")
+    assert not app.game_meta(info, 1).endswith("not yet reviewed")

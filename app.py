@@ -31,6 +31,10 @@ st.set_page_config(
 )
 
 DATA_PATH = Path(__file__).resolve().parent / "processed" / "launch_daily.parquet"
+INFO_PATH = Path(__file__).resolve().parent / "data" / "game_info.csv"
+NOT_GENRES = {"Free To Play", "Early Access"}   # business models, not genres
+MODES = ["Single-player", "Multiplayer", "Both"]
+REVIEWED = {"yes", "y", "true", "1", "x", "✓", "✔", "ok", "looks good"}   # "Looks Good?" answers
 
 MAX_DAYS = 180           # data loaded and plotted; the slider zooms within it
 MIN_DAYS = 14
@@ -87,6 +91,7 @@ st.markdown(
     .op-arrow{align-self:center;color:#B7C0CD;font-size:1.2rem}
     .op-pattern{font-size:.9rem;color:#5F6D82;margin:0 0 8px}
     .op-pattern b{color:#27364E}
+    .op-meta{font-size:.8rem;color:#8793A3;margin:-4px 0 10px}
     @media (max-width:640px){.op-arrow{display:none}}
     </style>
     """,
@@ -120,6 +125,76 @@ def load_data(mtime: int) -> pd.DataFrame:
     # Keep the game order from build_launch_data.GAMES (first game = default).
     df["order"] = df.groupby("appid", sort=False).ngroup()
     return add_smoothing(df).sort_values(["order", "day"]).reset_index(drop=True)
+
+
+def split_list(value) -> list[str]:
+    """'Action|RPG' -> ['Action', 'RPG']; blank -> []."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
+    return [part.strip() for part in str(value).split("|") if part.strip()]
+
+
+def prepare_info(info: pd.DataFrame) -> pd.DataFrame:
+    """Game details for the filters, indexed by AppID.
+
+    genres_override (filled by hand) replaces Steam's genres when it's set.
+    "Free To Play" and "Early Access" are dropped: they're business models,
+    not genres (free games are found with the launch-price filter).
+    """
+    info = info.copy()
+    override = info.get("genres_override", pd.Series(index=info.index, dtype=object))
+    genres = override.where(override.map(lambda v: bool(split_list(v))), info["genres"])
+    info["genre_list"] = genres.map(lambda v: [g for g in split_list(v) if g not in NOT_GENRES])
+    info["publisher_list"] = info["publishers"].map(split_list)
+    info["year"] = pd.to_datetime(info["release_date"]).dt.year
+    info["launch_price_usd"] = pd.to_numeric(info["launch_price_usd"], errors="coerce")
+    # Ticked off in the team's review sheet ("Looks Good?" column).
+    looks_good = info.get("Looks Good?", pd.Series(index=info.index, dtype=object))
+    info["reviewed"] = looks_good.map(lambda v: str(v).strip().casefold() in REVIEWED)
+    return info.set_index("appid")
+
+
+@st.cache_data(show_spinner=False)
+def load_info(mtime: int | None) -> pd.DataFrame:
+    """data/game_info.csv, prepared for filtering; empty if the file is missing."""
+    if mtime is None:
+        return pd.DataFrame()
+    return prepare_info(pd.read_csv(INFO_PATH))
+
+
+def filter_games(info: pd.DataFrame, genres=(), publishers=(), modes=(),
+                 years: tuple | None = None, prices: tuple | None = None) -> set[int]:
+    """AppIDs matching every active filter. A game matches a genre or publisher
+    filter if it has any of the chosen ones. None or empty = filter not used."""
+    keep = pd.Series(True, index=info.index)
+    if genres:
+        keep &= info["genre_list"].map(lambda gs: bool(set(gs) & set(genres)))
+    if publishers:
+        keep &= info["publisher_list"].map(lambda ps: bool(set(ps) & set(publishers)))
+    if modes:
+        keep &= info["main_mode"].isin(modes)
+    if years:
+        keep &= info["year"].between(*years)
+    if prices:
+        keep &= info["launch_price_usd"].between(*prices)   # unknown price: excluded
+    return set(info.index[keep])
+
+
+def game_meta(info: pd.DataFrame, appid: int) -> str:
+    """'Action, RPG · FromSoftware, Inc., Bandai Namco · $59.99 at launch · Single-player · 2022'."""
+    if appid not in info.index:
+        return ""
+    row = info.loc[appid]
+    price = row["launch_price_usd"]
+    parts = [
+        ", ".join(row["genre_list"]),
+        ", ".join(row["publisher_list"]),
+        "" if pd.isna(price) else ("Free to play" if price == 0 else f"${price:,.2f} at launch"),
+        row["main_mode"] if isinstance(row["main_mode"], str) else "",
+        str(row["year"]),
+        "" if row["reviewed"] else "not yet reviewed",
+    ]
+    return " · ".join(p for p in parts if p)
 
 
 def leveling_off_day(smooth: pd.Series) -> int | None:
@@ -514,7 +589,7 @@ SHAPE_BLURB = {
 }
 
 
-def stage_cards(s: dict, accent: str) -> str:
+def stage_cards(s: dict, accent: str, meta: str = "") -> str:
     """The game's shape, then three cards in reading order."""
     def card(step: str, big: str, small: str, color: str) -> str:
         return (f'<div class="op-card" style="--accent:{color}"><div class="op-step">{step}</div>'
@@ -522,7 +597,8 @@ def stage_cards(s: dict, accent: str) -> str:
 
     arrow = '<div class="op-arrow">→</div>'
     pattern = (f'<div class="op-pattern"><b>{SHAPE_ICON[s["shape"]]} {s["shape"]}</b> · '
-               f'{SHAPE_BLURB[s["shape"]]}</div>')
+               f'{SHAPE_BLURB[s["shape"]]}</div>'
+               + (f'<div class="op-meta">{escape(meta)}</div>' if meta else ""))
     d = s["peak_date"]
     end_small = f"{vs_launch_text(s['end_vs_launch'])}, average of days {s['tail_start']}–{s['last_day']}"
 
@@ -567,15 +643,75 @@ game_ids = list(names)
 colors = {appid: PALETTE[i % len(PALETTE)] for i, appid in enumerate(game_ids)}
 stages = {appid: game_stages(data.loc[data["appid"].eq(appid)]) for appid in game_ids}
 
+info = load_info(INFO_PATH.stat().st_mtime_ns if INFO_PATH.is_file() else None)
+FILTER_KEYS = ["f_genre", "f_publisher", "f_mode", "f_year", "f_price"]
+
+
+def clear_filters() -> None:
+    for key in FILTER_KEYS:
+        st.session_state.pop(key, None)
+
+
 with st.container(border=True):
+    shown = game_ids
+    if len(info):
+        sub = info.loc[[i for i in game_ids if i in info.index]]
+        all_genres = sorted({g for gs in sub["genre_list"] for g in gs})
+        all_publishers = sorted({p for ps in sub["publisher_list"] for p in ps}, key=str.casefold)
+        year_span = (int(sub["year"].min()), int(sub["year"].max()))
+        top_price = sub["launch_price_usd"].max()
+        price_span = (0, int(math.ceil((top_price if pd.notna(top_price) else 70) / 10) * 10))
+        state = st.session_state
+        active = sum([
+            bool(state.get("f_genre")), bool(state.get("f_publisher")), bool(state.get("f_mode")),
+            tuple(state.get("f_year", year_span)) != year_span,
+            tuple(state.get("f_price", price_span)) != price_span,
+        ])
+        title = "Filter the game list" + (f" · {active} active" if active else "")
+        with st.expander(title, expanded=bool(active)):
+            c1, c2, c3 = st.columns(3)
+            genres = c1.multiselect("Genre", all_genres, key="f_genre", placeholder="Any genre")
+            publishers = c2.multiselect("Publisher", all_publishers, key="f_publisher",
+                                        placeholder="Any publisher")
+            modes = c3.multiselect("Players", MODES, key="f_mode", placeholder="Any",
+                                   help="The game's main way to play, checked by the team "
+                                        "(Steam tags many single-player games as multiplayer too).")
+            c4, c5, c6 = st.columns([2, 2, 1], vertical_alignment="bottom")
+            years = c4.slider("Release year", *year_span, value=year_span, key="f_year")
+            prices = c5.slider("Launch price (USD)", *price_span, value=price_span, step=5,
+                               key="f_price", format="$%d", help="Price on Steam at release; $0 = free.")
+            c6.button("Clear filters", on_click=clear_filters, disabled=not active,
+                      width="stretch")
+            unreviewed = int((~sub["reviewed"]).sum())
+            if unreviewed:
+                st.caption(f"⚠️ Launch prices and single/multiplayer are drafts: the team has "
+                           f"checked {len(sub) - unreviewed} of {len(sub)} games so far.")
+        if active:
+            allowed = filter_games(
+                sub, genres, publishers, modes,
+                years=years if tuple(years) != year_span else None,
+                prices=prices if tuple(prices) != price_span else None,
+            )
+            shown = [i for i in game_ids if i in allowed]
+
+    # Keep the picked games that still match; if the filters removed all of
+    # them, start from the first match instead of an empty chart.
+    picked = st.session_state.get("games")
+    if picked is None:
+        st.session_state["games"] = shown[:1]
+    else:
+        kept = [g for g in picked if g in shown]
+        st.session_state["games"] = kept if kept or not picked else shown[:1]
     ids = st.multiselect(
-        "Games", options=game_ids, default=game_ids[:1], format_func=names.get,
-        placeholder="Add a game to compare…",
+        "Games", options=shown, key="games", format_func=names.get,
+        placeholder="Add a game to compare…" if shown else "No games match these filters",
     )
+    if len(shown) < len(game_ids):
+        st.caption(f"{len(shown)} of {len(game_ids)} games match the filters.")
     left, mid, right = st.columns([2, 1, 1], gap="large")
     with left:
         days = st.slider("Days after release", min_value=MIN_DAYS, max_value=MAX_DAYS,
-                         value=MAX_DAYS, step=1)
+                         value=MAX_DAYS, step=1, key="days")
     with mid:
         units = st.radio("Show", [PCT, PLAYERS], horizontal=True,
                          help="% of peak puts games of different sizes on the same scale: "
@@ -585,13 +721,15 @@ with st.container(border=True):
                         format_func=lambda a: "Since release" if a == SINCE_RELEASE else "Calendar")
 
 if not ids:
-    st.info("Pick at least one game above.")
+    st.info("Pick at least one game above." if shown
+            else "No games match these filters. Try removing one, or click “Clear filters”.")
     st.stop()
 
 ids = [i for i in game_ids if i in ids]  # keep a stable order and colors
 
 if len(ids) == 1:
-    st.markdown(stage_cards(stages[ids[0]], colors[ids[0]]), unsafe_allow_html=True)
+    st.markdown(stage_cards(stages[ids[0]], colors[ids[0]], game_meta(info, ids[0]) if len(info) else ""),
+                unsafe_allow_html=True)
 
 with st.container(border=True):
     layout = "One chart"

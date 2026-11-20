@@ -9,9 +9,11 @@ __pycache__/
 .venv/
 .ipynb_checkpoints/
 .streamlit/secrets.toml
-Data/
 # Raw downloads (e.g. SteamDB chart exports) stay local; only processed/ is published.
 data/raw/
 *.xls
 .DS_Store
 backup_before_extension_*/
+
+# Team-reviewed game details (an exception to the *.csv rule above).
+!data/game_info.csv

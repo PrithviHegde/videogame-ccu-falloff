@@ -15,6 +15,7 @@ An interactive look at the first 180 days after release for well-known Steam gam
   3. **Settled:** where it ends up (average of the last 30 days).
 - **Comparisons.** Pick several games and view them on one chart (as % of each game's own peak, so big and small games share a scale) or side by side. A strip under the chart lines up each game's stages.
 - **Controls.** Zoom from 14 to 180 days, switch between % of peak and player counts, and between days since release and calendar dates.
+- **Filters.** Narrow the game list by genre, publisher, single-player or multiplayer, release year and launch price.
 
 Games currently included: see `GAMES` in `build_launch_data.py` (19 games at the moment, from Skyrim in 2011 to Oblivion Remastered in 2025).
 
@@ -46,13 +47,36 @@ pytest                    # runs the tests (a few seconds)
    python build_launch_data.py
    ```
    This rewrites `processed/launch_daily.parquet`, which keeps only the first 180 days per game. The app picks it up automatically.
+4. Fetch the game's details from the Steam store for the filters:
+   ```bash
+   python build_game_info.py
+   ```
+   This updates `data/game_info.csv`. Then fill in the new row's hand-checked columns (any spreadsheet app works):
+   - `launch_price_usd`: the base-edition price on Steam at release, `0` for free to play
+   - `main_mode`: `Single-player`, `Multiplayer` or `Both` (Steam tags many single-player games as multiplayer, so this is checked by hand)
+   - `genres_override` (optional): replaces Steam's genres when they're misleading
+   - `notes`: where the values came from
+
+   Re-running the script refreshes the Steam columns but never overwrites these.
+
+## Reviewing game details
+
+Launch prices and single/multiplayer in `data/game_info.csv` are checked by hand. The team reviews them in a shared Google Sheet with the same columns, plus **Looks Good?** and **Reviewer Notes**:
+
+1. In the sheet, check each value against a source (Wikipedia, launch-week press, SteamDB price history), fix it if needed, put the source in `notes`, and mark **Looks Good?** as `Yes`.
+2. Only edit `launch_price_usd`, `main_mode`, `genres_override`, `notes`, **Looks Good?** and **Reviewer Notes**. Don't rename, reorder or delete columns.
+3. One person downloads the sheet as CSV (File → Download → CSV), saves it over `data/game_info.csv`, runs `python build_game_info.py` and `pytest`, and opens a pull request.
+
+Until every game is marked **Looks Good?**, the app's filter panel shows a warning that these values are drafts. `tests/test_game_info.py` fails the pull request if the CSV has a value the app can't read, such as a price written as `$59.99`.
 
 ## Repository layout
 
 ```
 app.py                         the Streamlit app (data prep, charts, page)
 build_launch_data.py           SteamDB exports -> processed/launch_daily.parquet
-processed/launch_daily.parquet the data the app uses (first 180 days per game)
+build_game_info.py             Steam store details -> data/game_info.csv
+processed/launch_daily.parquet player counts the app uses (first 180 days per game)
+data/game_info.csv             genres, publishers, launch price, single/multiplayer (team-reviewed)
 tests/                         smoke tests (app loads) and unit tests (calculations)
 .streamlit/config.toml         theme
 ```
@@ -70,4 +94,5 @@ Nate Aune, Cade Teets, Haoye Zhang, Prithvi Hegde, Meg Kaki.
 ## Data and credits
 
 - Player counts: [SteamDB](https://steamdb.info), daily peak concurrent players, downloaded manually per game. Only the first 180 days after launch are kept here.
+- Genres, publishers and developers: the Steam store. Launch prices and main play mode: checked by the team.
 - Not affiliated with Valve or SteamDB. Game names are trademarks of their owners.
