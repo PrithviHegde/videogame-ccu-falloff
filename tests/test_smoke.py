@@ -20,8 +20,11 @@ def radio(at: AppTest, label: str):
     return next(r for r in at.radio if r.label == label)
 
 
-def open_app() -> AppTest:
-    return AppTest.from_file(APP_FILE, default_timeout=120).run()
+def open_app(clear_filters: bool = False) -> AppTest:
+    at = AppTest.from_file(APP_FILE, default_timeout=120).run()
+    if clear_filters:     # on load, the filters frame the default game
+        at.button[0].click().run()
+    return at
 
 
 # AppIDs in processed/launch_daily.parquet, in build_launch_data.GAMES order.
@@ -39,7 +42,7 @@ def test_default_view_one_game_180_days():
 
 
 def test_comparing_all_games_both_layouts():
-    at = open_app()
+    at = open_app(clear_filters=True)
     at.multiselect(key="games").set_value(ALL_GAMES).run()
     assert_healthy(at)
     assert any("stages" in c.value for c in at.caption)   # stage strip under the chart
@@ -48,7 +51,7 @@ def test_comparing_all_games_both_layouts():
 
 
 def test_calendar_axis_players_and_short_window():
-    at = open_app()
+    at = open_app(clear_filters=True)
     at.multiselect(key="games").set_value(ALL_GAMES[:2]).run()
     radio(at, "Time axis").set_value("Calendar date").run()
     radio(at, "Show").set_value("Players").run()
@@ -63,8 +66,31 @@ def test_no_games_selected():
     assert at.info
 
 
-def test_filters_narrow_the_game_list():
+def test_filters_follow_the_default_game():
     at = open_app()
+    assert_healthy(at)
+    assert at.selectbox(key="f_genre").value == "RPG"           # Elden Ring is Action|RPG
+    assert at.selectbox(key="f_mode").value == "Single-player"
+    options = at.multiselect(key="games").options
+    assert "Elden Ring" in options and "Cyberpunk 2077" in options
+    assert "Rocket League" not in options                        # not similar
+
+
+def test_picking_games_moves_the_filters():
+    at = open_app()
+    at.multiselect(key="games").set_value([1245620, 1091500]).run()   # + Cyberpunk (offered)
+    assert_healthy(at)
+    assert at.slider(key="f_year").value == (2018, 2024)        # 2020-2022, ± 2 years
+    assert at.multiselect(key="games").value == [1245620, 1091500]
+    at.button[0].click().run()                                  # Clear filters: all games again
+    at.multiselect(key="games").set_value([1245620, 1091500, 377160, 72850]).run()
+    assert_healthy(at)
+    assert at.slider(key="f_year").value[0] <= 2011             # now framing Skyrim (2011) too
+    assert len(at.multiselect(key="games").value) == 4
+
+
+def test_filters_narrow_the_game_list():
+    at = open_app(clear_filters=True)
     at.selectbox(key="f_mode").set_value("Multiplayer").run()
     assert_healthy(at)
     options = at.multiselect(key="games").options
@@ -75,7 +101,7 @@ def test_filters_narrow_the_game_list():
 
 
 def test_genre_and_publisher_filters():
-    at = open_app()
+    at = open_app(clear_filters=True)
     at.selectbox(key="f_genre").set_value("Sports").run()
     assert at.multiselect(key="games").options == ["Rocket League"]
     at.selectbox(key="f_genre").set_value("All genres").run()
@@ -86,7 +112,7 @@ def test_genre_and_publisher_filters():
 
 
 def test_filters_with_no_match_and_clear():
-    at = open_app()
+    at = open_app(clear_filters=True)
     at.slider(key="f_price").set_value((0, 0)).run()            # free games only
     at.selectbox(key="f_mode").set_value("Single-player").run()
     assert_healthy(at)

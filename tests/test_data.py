@@ -306,3 +306,48 @@ def test_reviewed_flag_from_looks_good_column(app):
     assert info["reviewed"].tolist() == [True, False, True]
     assert app.game_meta(info, 2).endswith("not yet reviewed")
     assert not app.game_meta(info, 1).endswith("not yet reviewed")
+
+
+# ------------------------------ app: snapping ------------------------------
+
+SPANS = dict(price_span=(0, 70), year_span=(2010, 2025))
+
+
+def test_snap_one_game_frames_it_loosely(app, info):
+    s = app.snap_filters(info, [1], **SPANS)              # Solo RPG, $59.99, 2015
+    assert s["f_price"] == (45, 70)                         # $59.99 ± $10, to $5 steps
+    assert s["f_year"] == (2013, 2017)                      # 2015 ± 2
+    assert s["f_genre"] == "Action"                         # Action (3 games) beats RPG (1)
+    assert s["f_mode"] == "Single-player"
+    assert s["f_publisher"] == app.ANY_PUBLISHER            # not snapped for one game
+
+
+def test_snap_keeps_the_selected_games_in_the_list(app, info):
+    for sel in ([1], [2], [1, 2], [2, 3]):
+        s = app.snap_filters(info, sel, **SPANS)
+        allowed = app.filter_games(
+            info,
+            genres=[s["f_genre"]] if s["f_genre"] != app.ANY_GENRE else (),
+            publishers=[s["f_publisher"]] if s["f_publisher"] != app.ANY_PUBLISHER else (),
+            modes=[s["f_mode"], "Both"] if s["f_mode"] != app.ANY_TYPE else (),
+            years=s["f_year"], prices=s["f_price"])
+        assert set(sel) <= allowed, sel
+
+
+def test_snap_mixed_selection_leaves_unshared_filters_open(app, info):
+    s = app.snap_filters(info, [1, 3], **SPANS)             # Action|RPG + Simulation|Indie
+    assert s["f_genre"] == app.ANY_GENRE
+    assert s["f_mode"] == "Single-player"                   # Single-player + Both
+    s = app.snap_filters(info, [1, 2], **SPANS)             # Single-player + Multiplayer
+    assert s["f_mode"] == app.ANY_TYPE
+    assert s["f_publisher"] == "Big Co"                     # shared by 2+ games
+
+
+def test_snap_unknown_price_leaves_price_open(app, info):
+    assert app.snap_filters(info, [4], **SPANS)["f_price"] == (0, 70)
+
+
+def test_snap_nothing_selected_is_all_defaults(app, info):
+    s = app.snap_filters(info, [], **SPANS)
+    assert s == {"f_price": (0, 70), "f_year": (2010, 2025), "f_genre": app.ANY_GENRE,
+                 "f_mode": app.ANY_TYPE, "f_publisher": app.ANY_PUBLISHER}

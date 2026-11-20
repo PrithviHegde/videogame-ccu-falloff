@@ -15,7 +15,7 @@ An interactive look at the first 180 days after release for well-known Steam gam
   3. **Settled:** where it ends up (average of the last 30 days).
 - **Comparisons.** Pick several games and view them on one chart (as % of each game's own peak, so big and small games share a scale) or side by side. A strip under the chart lines up each game's stages.
 - **Controls.** Zoom from 14 to 180 days, switch between % of peak and player counts, and between days since release and calendar dates.
-- **Filters** (left panel). Narrow the game list by launch price, release year, genre, game type (single-player or multiplayer) and publisher, then search for games by title. A red dot marks any filter that's in use.
+- **Picking games and filters.** Search for games above the chart. The filters in the left panel (launch price, release year, genre, game type, publisher) narrow that list, and when you pick games they move to frame them, so the list shows similar games: picking Elden Ring suggests the other single-player RPGs from 2020–2024. A red dot marks any filter that's in use; *Clear filters* shows every game again.
 
 Games currently included: see `GAMES` in `build_launch_data.py` (19 games at the moment, from Skyrim in 2011 to Oblivion Remastered in 2025).
 
