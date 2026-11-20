@@ -56,27 +56,61 @@ def test_read_export_rejects_wrong_columns(build, tmp_path):
 
 # ---------------------------- launch_day ----------------------------
 
-def test_launch_day_skips_small_prerelease_counts(build):
-    s = daily([1, 5, 20, 900, 1000, 800, 700])
-    assert build.launch_day(s) == pd.Timestamp("2024-01-04")
+def test_launch_day_is_the_release_date(build):
+    s = daily([3, 900, 1000, 800], start="2024-01-01")
+    assert build.launch_day(s, "2024-01-02") == pd.Timestamp("2024-01-02")
 
 
-def test_launch_day_ignores_one_day_glitch(build):
-    # A lone spike (like Fallout 4's Nov 1, 2015) is not a launch.
-    s = daily([1, 1000, 2, 3, 900, 950, 800, 700])
-    assert build.launch_day(s) == pd.Timestamp("2024-01-05")
+def test_launch_day_keeps_release_date_even_if_small(build):
+    # A small launch (like Hollow Knight) still starts on its release date.
+    s = daily([0, 40, 60, 90, 80], start="2024-01-01")
+    assert build.launch_day(s, "2024-01-02") == pd.Timestamp("2024-01-02")
+
+
+def test_launch_day_moves_to_next_day_when_release_date_is_empty(build):
+    # Unlocked after midnight UTC: nothing recorded on the official date.
+    s = daily([900, 1000, 800], start="2024-01-03")
+    assert build.launch_day(s, "2024-01-02") == pd.Timestamp("2024-01-03")
+
+
+def test_launch_day_moves_to_next_day_when_release_date_is_near_zero(build):
+    # Like Fallout 4: a few early unlocks on the official date, launch the next day.
+    s = daily([14, 450, 470, 430], start="2024-01-02")
+    assert build.launch_day(s, "2024-01-02") == pd.Timestamp("2024-01-03")
 
 
 # --------------------------- launch_window ---------------------------
 
-def test_launch_window_starts_at_launch_and_keeps_gaps(build):
+def test_launch_window_starts_at_release_and_keeps_gaps(build):
     s = daily([1, 500, 400, 300, 200, 100])
     s = s.drop(pd.Timestamp("2024-01-05"))     # one missing day after launch
-    w = build.launch_window(s, days=5)
+    w = build.launch_window(s, "2024-01-02", days=5)
     assert w["day"].tolist() == [0, 1, 2, 3, 4]
     assert w["date"].iloc[0] == pd.Timestamp("2024-01-02")
     assert np.isnan(w["players"].iloc[3])      # not filled in
     assert w["players"].iloc[4] == 100
+
+
+# ---------------------------- check_window ----------------------------
+
+def test_check_window_rejects_data_starting_after_release(build):
+    s = daily([500, 400, 300], start="2024-01-10")
+    w = build.launch_window(s, "2024-01-01", days=3)
+    assert "after the release date" in build.check_window(s, w, "2024-01-01")
+
+
+def test_check_window_rejects_too_many_missing_days(build, monkeypatch):
+    monkeypatch.setattr(build, "MAX_MISSING_DAYS", 1)
+    monkeypatch.setattr(build, "DAYS", 5)
+    s = daily([500, 400, 300, 200, 100]).drop(pd.to_datetime(["2024-01-02", "2024-01-03"]))
+    w = build.launch_window(s, "2024-01-01", days=5)
+    assert "no data" in build.check_window(s, w, "2024-01-01")
+
+
+def test_check_window_accepts_complete_data(build):
+    s = daily([500, 400, 300, 200, 100])
+    w = build.launch_window(s, "2024-01-01", days=5)
+    assert build.check_window(s, w, "2024-01-01") is None
 
 
 # --------------------------- app: smoothing ---------------------------
@@ -151,10 +185,55 @@ def test_game_stages_settled_is_where_it_ends_up(app):
     assert s["settled"] == pytest.approx(7)       # mean of 8 and 6
 
 
-def test_game_stages_without_a_bend(app):
+def test_game_stages_flat_game_has_no_falloff(app):
     g = app.add_smoothing(game_rows([5, 5, 5, 5, 5]), window=1)
-    s = app.game_stages(g)
-    assert s["knee"] is None and s["settled"] is None and s["lost_pct"] is None
+    s = app.game_stages(g, tail=2)
+    assert not s["has_falloff"] and s["knee"] is None and s["lost_pct"] is None
+    assert s["settled"] == pytest.approx(5)
+    assert s["shape"] == app.GROWS          # ends level with its launch week
+
+
+def test_game_stages_shape_falls_off(app):
+    g = app.add_smoothing(game_rows([100, 90, 60, 30, 15, 10, 10, 10, 10, 10]), window=1)
+    s = app.game_stages(g, tail=3, late_peak_day=3, grows_peak_day=6)
+    assert s["shape"] == app.FALLS_OFF
+    assert not s["has_growth"] and s["has_falloff"]
+
+
+def test_game_stages_shape_peaks_late(app):
+    # Climbs to day 4, then falls well below launch week.
+    values = [40, 60, 80, 90, 100, 60, 30, 15, 10, 10, 10, 10]
+    g = app.add_smoothing(game_rows(values), window=1)
+    s = app.game_stages(g, tail=3, late_peak_day=3, grows_peak_day=8)
+    assert s["shape"] == app.LATE_PEAK
+    assert s["has_growth"] and s["growth_day"] == 4
+    assert s["has_falloff"] and s["falloff_start"] == 4
+
+
+def test_game_stages_shape_grows(app):
+    values = [10, 12, 15, 20, 30, 40, 50, 60, 70, 80]
+    g = app.add_smoothing(game_rows(values), window=1)
+    s = app.game_stages(g, tail=2, late_peak_day=3, grows_peak_day=6)
+    assert s["shape"] == app.GROWS
+    assert s["has_growth"] and s["growth_day"] == 9 and not s["has_falloff"]
+    launch_week = sum(values[:7]) / 7
+    assert s["launch_week"] == pytest.approx(launch_week)
+    assert s["end_vs_launch"] == pytest.approx(100 * 75 / launch_week)
+
+
+def test_game_stages_small_dip_is_not_a_falloff(app):
+    # Grows, then dips 10%: below MIN_FALLOFF_PCT, so no falloff stage.
+    values = [10, 20, 40, 80, 100, 98, 95, 92, 90, 90, 90, 90]
+    g = app.add_smoothing(game_rows(values), window=1)
+    s = app.game_stages(g, tail=3, late_peak_day=3, grows_peak_day=6)
+    assert not s["has_falloff"]
+
+
+def test_change_and_vs_launch_text(app):
+    assert app.change_text(1.95) == "+95%"
+    assert app.change_text(4.2) == "4.2×"
+    assert app.vs_launch_text(5) == "5% of launch week"
+    assert app.vs_launch_text(414) == "4.1× launch week"
 
 
 def test_compact_numbers(app):

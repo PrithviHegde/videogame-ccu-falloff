@@ -36,6 +36,10 @@ MAX_DAYS = 180           # data loaded and plotted; the slider zooms within it
 MIN_DAYS = 14
 SMOOTH_DAYS = 7          # rolling average that evens out weekend bumps
 TAIL_DAYS = 30           # the settled level is the average of the last 30 days
+LAUNCH_WEEK = 7          # "launch week" = days 0-6
+LATE_PEAK_DAY = 14       # a 7-day-average top on or after this day counts as growth first
+GROWS_PEAK_DAY = 60      # top this late (or ending above launch week) = "Grows"
+MIN_FALLOFF_PCT = 25     # smaller drops after the top are not called a falloff
 
 INK = "#253249"
 MUTED = "#7B8698"
@@ -46,6 +50,10 @@ FALLOFF_TINT = "rgba(200,128,119,.09)"
 FALLOFF_INK = "#A4655D"
 SETTLED_TINT = "rgba(83,152,133,.09)"
 SETTLED_INK = "#3F7A69"
+GROWTH_TINT = "rgba(85,120,183,.09)"
+GROWTH_INK = "#47689F"
+FALLS_OFF, LATE_PEAK, GROWS = "Falls off", "Peaks late", "Grows"
+SHAPE_ICON = {FALLS_OFF: "↘", LATE_PEAK: "↗↘", GROWS: "↗"}
 PCT = "% of peak"
 PLAYERS = "Players"
 SINCE_RELEASE = "Days since release"
@@ -77,6 +85,8 @@ st.markdown(
       line-height:1.25;margin-top:4px}
     .op-small{font-size:.82rem;color:#708096;margin-top:2px}
     .op-arrow{align-self:center;color:#B7C0CD;font-size:1.2rem}
+    .op-pattern{font-size:.9rem;color:#5F6D82;margin:0 0 8px}
+    .op-pattern b{color:#27364E}
     @media (max-width:640px){.op-arrow{display:none}}
     </style>
     """,
@@ -134,49 +144,81 @@ def leveling_off_day(smooth: pd.Series) -> int | None:
     return int(seg.index[int(np.argmax(gap))])
 
 
-def game_stages(game: pd.DataFrame, tail: int = TAIL_DAYS) -> dict:
-    """Launch, falloff and settled stages for one game, from its full data.
+def game_stages(game: pd.DataFrame, tail: int = TAIL_DAYS, late_peak_day: int = LATE_PEAK_DAY,
+                grows_peak_day: int = GROWS_PEAK_DAY) -> dict:
+    """Shape and stages for one game, from its full data.
 
-    Falloff runs from the top of the 7-day average to the leveling-off day.
-    Settled starts there; its level is the average daily peak over the last
-    `tail` days, i.e. where the game ends up (the curve keeps sliding slowly
-    after the leveling-off day, so an average over the whole stage would sit
-    above most of it).
+    Shape (on the 7-day average):
+      - "Falls off": busiest in the first two weeks, then declines.
+      - "Peaks late": climbs for 2-8 weeks, then declines.
+      - "Grows": busiest after ~2 months, or ends above its launch week.
 
-    Computed once on all MAX_DAYS days, so the stages don't move when the
-    window slider changes.
+    Stages:
+      - Growth: from launch to the top of the 7-day average, if that's 2+ weeks in.
+      - Falloff: from the top to the leveling-off day, if the game lost at
+        least MIN_FALLOFF_PCT% on the way.
+      - Settled / end: the average daily peak over the last `tail` days,
+        i.e. where the game ends up.
+
+    "End vs launch week" (last `tail` days vs days 0-6) works for every shape,
+    so games that collapse and games that take off sit on one scale.
+
+    Computed once on all MAX_DAYS days, so nothing moves with the window slider.
     """
     game = game.sort_values("day")
     smooth = game.set_index("day")["smooth"]
     top = game["players"].max()
     peak_row = game.loc[game["players"].idxmax()]
-    start = int(smooth.idxmax())                  # falloff starts at the smoothed peak
-    knee = leveling_off_day(smooth)
+    last_day = int(game["day"].max())
+    tail_start = last_day - tail + 1
+    launch_week = game.loc[game["day"] < LAUNCH_WEEK, "players"].mean()
+    end = game.loc[game["day"] >= tail_start, "players"].mean()
+    top_day = int(smooth.idxmax())                # top of the 7-day average
+    end_vs_launch = 100 * end / launch_week if launch_week > 0 else np.nan
+
+    if top_day >= grows_peak_day or end >= launch_week:
+        shape = GROWS
+    elif top_day >= late_peak_day:
+        shape = LATE_PEAK
+    else:
+        shape = FALLS_OFF
+
     out = {
+        "shape": shape,
         "peak": top,
         "peak_day": int(peak_row["day"]),
         "peak_date": peak_row["date"],
-        "falloff_start": start,
-        "knee": knee,
+        "launch_week": launch_week,
+        "has_growth": top_day >= late_peak_day,
+        "growth_day": top_day,
+        "growth_top": smooth.max(),
+        "growth_x": smooth.max() / launch_week if launch_week > 0 else np.nan,
+        "falloff_start": top_day,
+        "has_falloff": False,
+        "knee": None,
         "lost_pct": None,
         "falloff_days": None,
         "half_life_days": None,
-        "settled": None,
-        "settled_pct": None,
-        "last_day": int(game["day"].max()),
-        "tail_start": int(game["day"].max()) - tail + 1,
+        "settled": end,
+        "settled_pct": 100 * end / top,
+        "end_vs_launch": end_vs_launch,
+        "last_day": last_day,
+        "tail_start": tail_start,
     }
-    if knee is None or knee <= start:
+    knee = leveling_off_day(smooth)
+    if knee is None or knee <= top_day:
         return out
-    kept = smooth[knee] / smooth[start]
-    settled = game.loc[game["day"] >= max(knee, out["tail_start"]), "players"].mean()
+    kept = smooth[knee] / smooth[top_day]
+    lost = 100 * (1 - kept)
+    if lost < MIN_FALLOFF_PCT:
+        return out
     out.update(
-        lost_pct=100 * (1 - kept),
-        falloff_days=knee - start,
+        has_falloff=True,
+        knee=knee,
+        lost_pct=lost,
+        falloff_days=knee - top_day,
         # Kept for the "halves every N days" wording we may switch to later.
-        half_life_days=(knee - start) * math.log(0.5) / math.log(kept) if 0 < kept < 1 else None,
-        settled=settled,
-        settled_pct=100 * settled / top,
+        half_life_days=(knee - top_day) * math.log(0.5) / math.log(kept) if 0 < kept < 1 else None,
     )
     return out
 
@@ -192,12 +234,44 @@ def compact(n: float) -> str:
     return f"{n:.0f}"
 
 
+def change_text(ratio: float) -> str:
+    """1.95 -> '+95%', 4.2 -> '4.2×'."""
+    return f"{ratio:.1f}×" if ratio >= 2 else f"+{100 * (ratio - 1):.0f}%"
+
+
+def up_text(ratio: float) -> str:
+    """Card headline: 1.28 -> 'Up 28%', 5.3 -> 'Up 5.3×'."""
+    return f"Up {ratio:.1f}×" if ratio >= 2 else f"Up {100 * (ratio - 1):.0f}%"
+
+
+def vs_launch_text(pct: float) -> str:
+    """Where a game ends up, compared with its launch week."""
+    return f"{pct / 100:.1f}× launch week" if pct >= 200 else f"{pct:.0f}% of launch week"
+
+
+def growth_text(s: dict) -> str:
+    ratio = s["growth_x"]
+    return (f"up {ratio:.1f}× by day {s['growth_day']}" if ratio >= 2
+            else f"up {100 * (ratio - 1):.0f}% by day {s['growth_day']}")
+
+
 def falloff_text(s: dict) -> str:
     return f"lost {s['lost_pct']:.0f}% in {s['falloff_days']} days"
 
 
 def settled_text(s: dict) -> str:
-    return f"≈ {compact(s['settled'])} players ({s['settled_pct']:.0f}% of peak)"
+    return f"≈ {compact(s['settled'])} players ({vs_launch_text(s['end_vs_launch'])})"
+
+
+def shape_summary(s: dict) -> str:
+    """One line per game: shape, then its stages, then where it ends up."""
+    parts = []
+    if s["has_growth"]:
+        parts.append(growth_text(s))
+    if s["has_falloff"]:
+        parts.append(falloff_text(s))
+    parts.append(f"ends at {vs_launch_text(s['end_vs_launch'])}")
+    return f"{SHAPE_ICON[s['shape']]} {s['shape']}: " + ", ".join(parts)
 
 
 # ----------------------------- charts -----------------------------
@@ -272,72 +346,103 @@ def add_game(fig: go.Figure, game: pd.DataFrame, name: str, color: str, units: s
 
 def add_stage_bands(fig: go.Figure, game: pd.DataFrame, s: dict, units: str, axis: str,
                     days: int, labels: bool, xref: str = "x", yref: str = "y") -> None:
-    """Shade the falloff and settled stages, with a dashed line at the leveling-off day.
+    """Shade each stage: growth, falloff, settled.
 
-    Labels sit at the top of each band, where the curve never is: every curve
-    starts high on the left and ends low on the right.
+    Labels go where the curve isn't: growth labels top-left (a rising curve
+    starts low), falloff and settled labels top-right of their bands (a falling
+    curve ends low), and a grower's end label bottom-right (it ends high).
     """
-    if s["knee"] is None:
-        return
     end = s["last_day"] + 0.5
-    start, knee = s["falloff_start"], s["knee"]
     paper = f"{yref} domain"     # 0 = bottom of this plot, 1 = top
-    for x0, x1, tint in ((start, knee, FALLOFF_TINT), (knee, end, SETTLED_TINT)):
+
+    def band(x0, x1, tint):
         fig.add_shape(type="rect", xref=xref, yref=paper, x0=to_x(game, x0, axis),
                       x1=to_x(game, x1, axis), y0=0, y1=1, fillcolor=tint,
                       line_width=0, layer="below")
-    fig.add_shape(type="line", xref=xref, yref=paper, x0=to_x(game, knee, axis),
-                  x1=to_x(game, knee, axis), y0=0, y1=1,
-                  line=dict(color=SETTLED_INK, width=1.3, dash="dash"))
-    level = s["settled_pct"] if units == PCT else s["settled"]
-    fig.add_shape(type="line", xref=xref, yref=yref,
-                  x0=to_x(game, max(knee, s["tail_start"]) - 0.5, axis),
-                  x1=to_x(game, end, axis), y0=level, y1=level,
-                  line=dict(color=SETTLED_INK, width=2, dash="dot"))
-    if not labels:
-        return
-    # Keep the falloff label inside the visible window when it's zoomed in.
-    falloff_x = min(knee, days - 1)
-    fig.add_annotation(
-        x=to_x(game, falloff_x, axis), y=0.97, xref=xref, yref=paper,
-        xanchor="right", yanchor="top", showarrow=False, align="right",
-        text=f"<b>FALLOFF</b><br>{falloff_text(s)}",
-        font=dict(size=12, color=FALLOFF_INK), xshift=-8,
-    )
-    if days - 1 - knee >= 25:   # only when the settled band has room in the window
+
+    def label(day, text, color, right, top=True):
         fig.add_annotation(
-            x=to_x(game, knee, axis), y=0.97, xref=xref, yref=paper,
-            xanchor="left", yanchor="top", showarrow=False, align="left",
-            text=f"<b>SETTLED</b> from day {knee}<br>{settled_text(s)}",
-            font=dict(size=12, color=SETTLED_INK), xshift=8,
+            x=to_x(game, day, axis), y=0.97 if top else 0.04, xref=xref, yref=paper,
+            xanchor="right" if right else "left", yanchor="top" if top else "bottom",
+            showarrow=False, align="right" if right else "left", text=text,
+            font=dict(size=12, color=color), xshift=-8 if right else 8,
         )
+
+    level = s["settled_pct"] if units == PCT else s["settled"]
+    tail_line = dict(type="line", xref=xref, yref=yref,
+                     x0=to_x(game, max(s["knee"] or 0, s["tail_start"]) - 0.5, axis),
+                     x1=to_x(game, end, axis), y0=level, y1=level,
+                     line=dict(color=SETTLED_INK, width=2, dash="dot"))
+
+    if s["has_growth"]:
+        band(-0.5, s["growth_day"], GROWTH_TINT)
+        if labels:
+            label(0, f"<b>GROWTH</b><br>{growth_text(s)}", GROWTH_INK, right=False)
+
+    if s["has_falloff"]:
+        start, knee = s["falloff_start"], s["knee"]
+        band(start, knee, FALLOFF_TINT)
+        band(knee, end, SETTLED_TINT)
+        fig.add_shape(type="line", xref=xref, yref=paper, x0=to_x(game, knee, axis),
+                      x1=to_x(game, knee, axis), y0=0, y1=1,
+                      line=dict(color=SETTLED_INK, width=1.3, dash="dash"))
+        fig.add_shape(**tail_line)
+        if labels:
+            # Keep the falloff label inside the visible window when it's zoomed in.
+            label(min(knee, days - 1), f"<b>FALLOFF</b><br>{falloff_text(s)}",
+                  FALLOFF_INK, right=True)
+            if days - 1 - knee >= 35:   # only when the settled band has room in the window
+                label(knee, f"<b>SETTLED</b> from day {knee}<br>{settled_text(s)}",
+                      SETTLED_INK, right=False)
+    else:
+        fig.add_shape(**tail_line)
+        if labels and days - 1 >= s["tail_start"]:
+            label(days - 1, f"<b>DAYS {s['tail_start']}–{s['last_day']}</b><br>{settled_text(s)}",
+                  SETTLED_INK, right=True, top=False)
 
 
 def add_stage_strip(fig: go.Figure, ids: list[int], stages: dict, names: dict,
                     colors: dict, row: int) -> None:
-    """One bar per game, split into launch / falloff / settled, on the days axis."""
+    """One bar per game on the days axis: ↗ growth, ↘ falloff, then where it ends up."""
     for appid in reversed(ids):          # first game on top
         s, name, color = stages[appid], names[appid], colors[appid]
         end = s["last_day"] + 1
-        if s["knee"] is None:
-            segments = [(0, end, "", .15, "No clear leveling-off within 180 days")]
+        end_label = f"≈ {compact(s['settled'])} · {vs_launch_text(s['end_vs_launch'])}"
+        segments = []
+        if s["has_growth"]:
+            segments.append((0, s["growth_day"], f"↗ {change_text(s['growth_x'])}", .45,
+                             f"Growth: {growth_text(s)}"))
         else:
+            segments.append((0, s["falloff_start"], "", .15,
+                             f"Launch: peak {s['peak']:,.0f} players on day {s['peak_day']}"))
+        if s["has_falloff"]:
             start, knee = s["falloff_start"], s["knee"]
-            segments = [
-                (0, start, "", .15, f"Launch: peak {s['peak']:,.0f} players on day {s['peak_day']}"),
-                (start, knee, f"−{s['lost_pct']:.0f}% in {s['falloff_days']}d", .85,
+            segments += [
+                (start, knee, f"↘ −{s['lost_pct']:.0f}% in {s['falloff_days']}d", .85,
                  f"Falloff: {falloff_text(s)} (days {start}–{knee})"),
-                (knee, end, settled_text(s), .25, f"Settled from day {knee}: {settled_text(s)}"),
+                (knee, end, end_label, .25, f"Settled from day {knee}: {settled_text(s)}"),
             ]
+        else:
+            rest_start = s["growth_day"] if s["has_growth"] else s["falloff_start"]
+            if s["has_growth"] and end - rest_start < 40:
+                # No room after the growth: show where it ends up on the growth bar.
+                x0, x1, text, alpha, hover = segments[0]
+                segments[0] = (x0, x1, f"{text} · ends {vs_launch_text(s['end_vs_launch'])}",
+                               alpha, f"{hover}; days {s['tail_start']}–{s['last_day']}: "
+                                      f"{settled_text(s)}")
+            segments.append((rest_start, end, end_label if end - rest_start >= 40 else "", .25,
+                             f"Days {s['tail_start']}–{s['last_day']}: {settled_text(s)}"))
+        label = f"{name}  {SHAPE_ICON[s['shape']]}"
         for x0, x1, text, alpha, hover in segments:
             if x1 <= x0:
                 continue
             fig.add_trace(go.Bar(
-                x=[x1 - x0], base=[x0], y=[name], orientation="h",
+                x=[x1 - x0], base=[x0], y=[label], orientation="h",
                 marker=dict(color=color, opacity=alpha, line_width=0),
                 text=[text], textposition="inside", insidetextanchor="middle",
                 textfont=dict(size=11, color="#FFFFFF" if alpha > .5 else INK),
-                hovertemplate=f"<b>{escape(name)}</b><br>{escape(hover)}<extra></extra>",
+                hovertemplate=(f"<b>{escape(name)}</b> · {escape(s['shape'])}<br>"
+                               f"{escape(hover)}<extra></extra>"),
                 showlegend=False, width=.62,
             ), row=row, col=1)
     fig.update_layout(barmode="overlay", uniformtext=dict(minsize=9, mode="hide"))
@@ -350,8 +455,9 @@ def trend_chart(data: pd.DataFrame, ids: list[int], stages: dict, colors: dict, 
     single = len(ids) == 1
     strip = not single and axis == SINCE_RELEASE
     if strip:
+        strip_share = min(0.55, (34 * len(ids) + 40) / (460 + 34 * len(ids) + 40))
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-                            row_heights=[0.74, 0.26])
+                            row_heights=[1 - strip_share, strip_share])
         where = dict(row=1, col=1)
     else:
         fig, where = go.Figure(), {}
@@ -378,12 +484,8 @@ def small_multiples(data: pd.DataFrame, ids: list[int], stages: dict, colors: di
                     names: dict, units: str, axis: str, days: int) -> go.Figure:
     ncols = 2
     nrows = math.ceil(len(ids) / ncols)
-    titles = []
-    for i in ids:
-        s = stages[i]
-        extra = (f"<br><span style='font-size:11px;color:{MUTED}'>{falloff_text(s)} · "
-                 f"settles {settled_text(s)}</span>" if s["knee"] is not None else "")
-        titles.append(f"{escape(names[i])}{extra}")
+    titles = [f"{escape(names[i])}<br><span style='font-size:11px;color:{MUTED}'>"
+              f"{escape(shape_summary(stages[i]))}</span>" for i in ids]
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
                         vertical_spacing=min(0.16, 0.36 / nrows), horizontal_spacing=0.08)
     for i, appid in enumerate(ids):
@@ -405,27 +507,51 @@ def small_multiples(data: pd.DataFrame, ids: list[int], stages: dict, colors: di
 
 # ------------------------------ page ------------------------------
 
+SHAPE_BLURB = {
+    "Falls off": "busiest in its first two weeks, then declines",
+    "Peaks late": "climbs for a few weeks, then declines",
+    "Grows": "ends up above its launch week",
+}
+
+
 def stage_cards(s: dict, accent: str) -> str:
-    """Three cards in reading order: launch → falloff → settled."""
+    """The game's shape, then three cards in reading order."""
     def card(step: str, big: str, small: str, color: str) -> str:
         return (f'<div class="op-card" style="--accent:{color}"><div class="op-step">{step}</div>'
                 f'<div class="op-big">{big}</div><div class="op-small">{small}</div></div>')
 
-    d = s["peak_date"]
-    launch = card("1 · Launch", f"{s['peak']:,.0f} players",
-                  f"most at once, on {day_label(s['peak_day']).lower()} "
-                  f"({d:%b} {d.day}, {d.year})", accent)
-    if s["knee"] is None:
-        rest = card("2 · Falloff", "—", "No clear leveling-off within 180 days", FALLOFF_INK)
-        return f'<div class="op-stages">{launch}<div class="op-arrow">→</div>{rest}</div>'
-    falloff = card("2 · Falloff", f"Lost {s['lost_pct']:.0f}%",
-                   f"in {s['falloff_days']} days, leveling off on day {s['knee']}",
-                   FALLOFF_INK)
-    settled = card("3 · Settled", f"≈ {s['settled']:,.0f} players",
-                   f"{s['settled_pct']:.0f}% of peak, average of days "
-                   f"{s['tail_start']}–{s['last_day']}", SETTLED_INK)
     arrow = '<div class="op-arrow">→</div>'
-    return f'<div class="op-stages">{launch}{arrow}{falloff}{arrow}{settled}</div>'
+    pattern = (f'<div class="op-pattern"><b>{SHAPE_ICON[s["shape"]]} {s["shape"]}</b> · '
+               f'{SHAPE_BLURB[s["shape"]]}</div>')
+    d = s["peak_date"]
+    end_small = f"{vs_launch_text(s['end_vs_launch'])}, average of days {s['tail_start']}–{s['last_day']}"
+
+    if s["shape"] == GROWS:
+        first = card("1 · Launch week", f"{s['launch_week']:,.0f} players",
+                     "average daily peak, days 0–6", accent)
+        growth_small = f"to ≈ {s['growth_top']:,.0f} by day {s['growth_day']} (7-day average)"
+        if s["has_falloff"]:
+            growth_small += f", then lost {s['lost_pct']:.0f}% by day {s['knee']}"
+        second = card("2 · Growth", up_text(s["growth_x"]), growth_small, GROWTH_INK)
+        third = card(f"3 · Days {s['tail_start']}–{s['last_day']}", f"≈ {s['settled']:,.0f} players",
+                     end_small, SETTLED_INK)
+    else:
+        if s["shape"] == LATE_PEAK:
+            first = card("1 · Climb", up_text(s["growth_x"]),
+                         f"from launch week to ≈ {s['growth_top']:,.0f} by day {s['growth_day']} "
+                         f"(7-day average)", GROWTH_INK)
+        else:
+            first = card("1 · Launch", f"{s['peak']:,.0f} players",
+                         f"most at once, on {day_label(s['peak_day']).lower()} "
+                         f"({d:%b} {d.day}, {d.year})", accent)
+        if s["has_falloff"]:
+            second = card("2 · Falloff", f"Lost {s['lost_pct']:.0f}%",
+                          f"in {s['falloff_days']} days, leveling off on day {s['knee']}",
+                          FALLOFF_INK)
+        else:
+            second = card("2 · Falloff", "—", "No clear leveling-off within 180 days", FALLOFF_INK)
+        third = card("3 · Settled", f"≈ {s['settled']:,.0f} players", end_small, SETTLED_INK)
+    return f'{pattern}<div class="op-stages">{first}{arrow}{second}{arrow}{third}</div>'
 
 
 st.markdown(
@@ -478,9 +604,11 @@ with st.container(border=True):
     notes = ["Thick line: 7-day average."]
     if len(ids) == 1 or layout != "One chart":
         notes.append("Thin line: each day's peak.")
-        notes.append("Shading: falloff, then settled; the dashed line is where the decline levels off.")
+        notes.append("Shading marks each stage (growth, falloff, settled); "
+                     "the dashed line is where the decline levels off.")
     elif axis == SINCE_RELEASE:
-        notes.append("Bars below: each game's launch, falloff and settled stages.")
+        notes.append("Bars below: each game's stages (↗ growth, ↘ falloff) and where it ends up "
+                     "compared with its launch week.")
     else:
         notes.append("Switch the time axis to “Since release” to compare stages.")
     st.caption(" ".join(notes))
@@ -490,16 +618,22 @@ with st.expander("How to read this", expanded=False):
         "- **Players** is the highest number of people playing the game *at the same time* "
         "on that day (peak concurrent players). It is not the number of different people "
         "who played, and not retention.\n"
-        "- **Day 0** is launch day. Days are counted in UTC, so day 0 can be the day after "
-        "the date on the store page.\n"
+        "- **Day 0** is the official release date on Steam. SteamDB counts days in UTC, "
+        "so for games that unlocked after midnight UTC, day 0 is the next day.\n"
         "- **The 7-day average** smooths out the weekly rhythm: more people play on weekends.\n"
         "- **% of peak**: 100% is the game's busiest day in its first six months.\n"
-        "- **Stages.** *Falloff* runs from the top of the 7-day average to the "
-        "**leveling-off point**, where the decline flattens out: the day the curve sits "
-        "furthest below a straight line drawn from its peak to day 180. *Settled* starts "
-        "there; its level (the dotted line) is the average daily peak over the last 30 days, "
-        "where the game ends up. Stages always use all 180 days, so they don't move with "
-        "the slider."
+        "- **Shapes.** ↘ *Falls off*: busiest in the first two weeks, then declines. "
+        "↗↘ *Peaks late*: climbs for 2–8 weeks first. ↗ *Grows*: busiest after about two "
+        "months, or ends above its launch week.\n"
+        "- **Stages.** *Growth* runs from launch to the top of the 7-day average, when that's "
+        "two or more weeks in. *Falloff* runs from the top to the **leveling-off point**, where "
+        "the decline flattens out: the day the curve sits furthest below a straight line drawn "
+        "from its top to day 180 (only drops of 25% or more count). *Settled* starts there; "
+        "its level (the dotted line) is the average daily peak over the last 30 days.\n"
+        "- **Compared with launch week**: the last 30 days' average divided by the average of "
+        "days 0–6. It works for every shape: 5% means the game kept a twentieth of its launch "
+        "crowd, 4× means it ended four times bigger.\n"
+        "- Everything uses all 180 days, so nothing moves with the slider."
     )
 
 st.markdown('<div class="op-rule"></div>', unsafe_allow_html=True)
