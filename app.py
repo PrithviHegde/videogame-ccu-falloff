@@ -34,14 +34,18 @@ DATA_PATH = Path(__file__).resolve().parent / "processed" / "launch_daily.parque
 INFO_PATH = Path(__file__).resolve().parent / "data" / "game_info.csv"
 NOT_GENRES = {"Free To Play", "Early Access"}   # business models, not genres
 MODES = ["Single-player", "Multiplayer", "Both"]
-ANY_GENRE, ANY_TYPE, ANY_PUBLISHER = "All genres", "All game types", "All publishers"
+ANY_GENRE, ANY_TYPE = "All genres", "All game types"
 GAME_TYPES = [ANY_TYPE, "Single-player", "Multiplayer"]
-PRICE_PAD, YEAR_PAD = 10, 2   # how far snapped filters reach beyond the picked games
 REVIEWED = {"yes", "y", "true", "1", "x", "✓", "✔", "ok", "looks good"}   # "Looks Good?" answers
 
 MAX_DAYS = 180           # data loaded and plotted; the slider zooms within it
 MIN_DAYS = 14
 SMOOTH_DAYS = 7          # rolling average that evens out weekend bumps
+CHART_TOP_ONE_GAME = 328   # px taken by everything above and below the chart, with the stage cards
+CHART_TOP_SEVERAL = 300    # ... without them (several games)
+CHART_MIN_HEIGHT = 320     # the chart never gets shorter than this
+CHART_HEIGHT = 350       # one game (px); with several, the line chart is shorter and
+STRIP_ROW = 34            # px per game in the stage bars under a multi-game chart
 TAIL_DAYS = 30           # the settled level is the average of the last 30 days
 LAUNCH_WEEK = 7          # "launch week" = days 0-6
 LATE_PEAK_DAY = 14       # a 7-day-average top on or after this day counts as growth first
@@ -71,31 +75,40 @@ st.markdown(
     <style>
     [data-testid="stApp"], [data-testid="stAppViewContainer"]{background:#F9FAFB;color:#253249}
     [data-testid="stHeader"]{background:transparent}
-    .block-container{max-width:1200px;padding-top:2rem;padding-bottom:3rem}
+    .block-container{max-width:1200px;padding-top:1.4rem;padding-bottom:1rem}
+    [data-testid="stMain"] [data-testid="stVerticalBlock"]{gap:.75rem}
     h1,h2,h3,h4{color:#253249!important;letter-spacing:-.03em}
     div[data-testid="stVerticalBlockBorderWrapper"]{
       background:#FFFFFF;border:1px solid #E7EAF0!important;
       border-radius:16px!important;box-shadow:0 3px 18px rgba(32,48,69,.025)
     }
     [data-testid="stCaptionContainer"] p{color:#8793A3;font-size:.8rem}
-    .op-name{font-family:Georgia,serif;font-size:2rem;color:#24344B;
+    .op-name{font-family:Georgia,serif;font-size:1.6rem;color:#24344B;
       letter-spacing:-.035em;font-weight:650;line-height:1.15}
-    .op-sub{font-size:.95rem;color:#5F6D82;margin:6px 0 18px;max-width:720px}
-    .op-rule{border-top:1px solid #E9ECF1;margin:1.5rem 0 .8rem}
-    .op-stages{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:2px 0 14px}
-    .op-card{flex:1 1 200px;background:#FFF;border:1px solid #E7EAF0;border-radius:13px;
-      padding:13px 18px;border-top:3px solid var(--accent)}
-    .op-step{font-size:.7rem;font-weight:750;letter-spacing:.11em;text-transform:uppercase;
-      color:var(--accent)}
-    .op-big{font-size:1.55rem;font-weight:650;color:#27364E;letter-spacing:-.03em;
-      line-height:1.25;margin-top:4px}
-    .op-small{font-size:.82rem;color:#708096;margin-top:2px}
+    [data-testid="stMarkdownContainer"]:has(> .op-name){margin-bottom:0!important}
+    .op-pick{font-size:1.1rem;font-weight:700;color:#24344B;line-height:1.2}
+    .op-picksub{font-size:.8rem;color:#7B8698;margin-top:1px}
+    [data-testid="stMarkdownContainer"]:has(> .op-pick){margin-bottom:0!important}
+    .op-stages{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:0}
+    /* Streamlit pulls markdown up by -1rem at the bottom, which made the cards
+       overlap the chart box below; cancel it for the cards row only. */
+    [data-testid="stMarkdownContainer"]:has(> .op-stages){margin-bottom:0!important}
+    .op-card{flex:1 1 200px;background:#FFF;border:1px solid #E7EAF0;
+      border-left:4px solid var(--accent);border-radius:10px;padding:10px 16px}
+    .op-head{display:flex;align-items:center;gap:8px;font-size:.95rem;font-weight:650;color:#27364E}
+    .op-num{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+      border-radius:50%;background:var(--accent);color:#FFF;font-size:.72rem;font-weight:700}
+    .op-value{display:flex;align-items:baseline;flex-wrap:wrap;gap:0 8px;margin-top:4px}
+    .op-big{font-size:1.6rem;font-weight:700;color:#1F2D44;letter-spacing:-.03em;line-height:1.15}
+    .op-unit{font-size:.9rem;color:#66748A}
     .op-arrow{align-self:center;color:#B7C0CD;font-size:1.2rem}
-    .op-pattern{font-size:.9rem;color:#5F6D82;margin:0 0 8px}
-    .op-pattern b{color:#27364E}
-    .op-meta{font-size:.8rem;color:#8793A3;margin:-4px 0 10px}
     section[data-testid="stSidebar"]{background:#F2F4F8;border-right:1px solid #E3E7EE}
-    .op-side{font-size:.72rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase;color:#798BB0;margin:0 0 4px}
+    [data-testid="stSidebarHeader"]{height:2.25rem;min-height:0;padding:.5rem 1rem 0;margin:0}
+    [data-testid="stSidebarUserContent"]{padding-top:0}
+    section[data-testid="stSidebar"] hr{margin:.5rem 0 .25rem}
+    .op-side{font-family:Georgia,serif;font-size:1.35rem;font-weight:650;color:#24344B;
+      letter-spacing:-.02em;line-height:1.2;padding-bottom:8px;border-bottom:1px solid #DCE1E9;
+      margin:0 0 6px}
     @media (max-width:640px){.op-arrow{display:none}}
     </style>
     """,
@@ -184,70 +197,27 @@ def filter_games(info: pd.DataFrame, genres=(), publishers=(), modes=(),
     return set(info.index[keep])
 
 
-def game_meta(info: pd.DataFrame, appid: int) -> str:
-    """'Action, RPG · FromSoftware, Inc., Bandai Namco · $59.99 at launch · Single-player · 2022'."""
-    if appid not in info.index:
-        return ""
-    row = info.loc[appid]
-    price = row["launch_price_usd"]
-    parts = [
-        ", ".join(row["genre_list"]),
-        ", ".join(row["publisher_list"]),
-        "" if pd.isna(price) else ("Free to play" if price == 0 else f"${price:,.2f} at launch"),
-        row["main_mode"] if isinstance(row["main_mode"], str) else "",
-        str(row["year"]),
-        "" if row["reviewed"] else "not yet reviewed",
-    ]
-    return " · ".join(p for p in parts if p)
+def filter_args(genre: str, game_type: str, years, prices, year_span: tuple,
+                price_span: tuple) -> dict:
+    """filter_games() arguments for the sidebar's current values; filters left
+    at their defaults are not applied."""
+    return dict(
+        genres=[genre] if genre != ANY_GENRE else (),
+        modes=[game_type, "Both"] if game_type != ANY_TYPE else (),   # "Both" fits either
+        years=tuple(years) if tuple(years) != tuple(year_span) else None,
+        prices=tuple(prices) if tuple(prices) != tuple(price_span) else None,
+    )
 
 
-def snap_filters(info: pd.DataFrame, selected: list[int], price_span: tuple,
-                 year_span: tuple) -> dict:
-    """Filter values that frame the selected games, so the game list shows similar ones.
-
-    - Launch price and release year: the selected games' range, widened by
-      PRICE_PAD dollars and YEAR_PAD years (one game alone would otherwise
-      leave a single price and year, i.e. nothing else to add).
-    - Genre: one all selected games share; the most common one if several
-      (so "games like Elden Ring" means the RPGs, not just Action games).
-    - Game type: Single-player or Multiplayer if every selected game fits it
-      ("Both" fits either).
-    - Publisher: only when 2+ games are selected and share one.
-    Anything the selection doesn't share stays at "All".
-    """
-    out = {"f_price": tuple(price_span), "f_year": tuple(year_span), "f_genre": ANY_GENRE,
-           "f_mode": ANY_TYPE, "f_publisher": ANY_PUBLISHER}
-    sel = info.loc[[i for i in selected if i in info.index]]
-    if sel.empty:
-        return out
-
-    prices = sel["launch_price_usd"]
-    if prices.notna().all():
-        lo = max(price_span[0], int(math.floor((prices.min() - PRICE_PAD) / 5) * 5))
-        hi = min(price_span[1], int(math.ceil((prices.max() + PRICE_PAD) / 5) * 5))
-        out["f_price"] = (lo, hi)
-    out["f_year"] = (max(year_span[0], int(sel["year"].min()) - YEAR_PAD),
-                     min(year_span[1], int(sel["year"].max()) + YEAR_PAD))
-
-    def most_common(shared: set, column: str) -> str:
-        return max(sorted(shared), key=lambda v: sum(v in vs for vs in info[column]))
-
-    shared_genres = set.intersection(*(set(g) for g in sel["genre_list"]))
-    if shared_genres:
-        out["f_genre"] = most_common(shared_genres, "genre_list")
-
-    modes = sel["main_mode"]
-    if modes.notna().all():
-        found = set(modes)
-        for mode in ("Single-player", "Multiplayer"):
-            if mode in found and found <= {mode, "Both"}:
-                out["f_mode"] = mode
-
-    if len(sel) >= 2:
-        shared_publishers = set.intersection(*(set(p) for p in sel["publisher_list"]))
-        if shared_publishers:
-            out["f_publisher"] = most_common(shared_publishers, "publisher_list")
-    return out
+def option_counts(info: pd.DataFrame, args: dict, field: str, options: list[str]) -> dict:
+    """How many games each option would show, given the other active filters
+    (like the counts next to filters on shopping sites)."""
+    counts = {}
+    for option in options:
+        trial = dict(args)
+        trial[field] = [option, "Both"] if field == "modes" else [option]
+        counts[option] = len(filter_games(info, **trial))
+    return counts
 
 
 def leveling_off_day(smooth: pd.Series) -> int | None:
@@ -441,15 +411,16 @@ def style_axes(fig: go.Figure, units: str, **where) -> None:
                      range=[0, 105] if units == PCT else None, **where)
 
 
-def base_layout(fig: go.Figure, height: int) -> None:
+def base_layout(fig: go.Figure, height: int | None) -> None:
     fig.update_layout(
         template="plotly_white", paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
         font=dict(family="Segoe UI, Inter, sans-serif", color=INK, size=13),
-        margin=dict(l=10, r=10, t=30, b=10), height=height, hovermode="closest",
+        margin=dict(l=10, r=10, t=12, b=6), height=height, hovermode="closest",
         hoverlabel=dict(bgcolor="#FFFFFF", bordercolor=GRID, font=dict(color=INK)),
         legend=dict(orientation="h", y=-0.15, x=0, title=""),
-        # Animate between window sizes instead of jumping.
-        transition=dict(duration=500, easing="cubic-in-out"),
+        # No transition animation: when a game is added, the chart changes size and
+        # content at once, and Plotly's animation then leaves it half-redrawn
+        # (lines cut off, axis in the wrong place).
         uirevision="keep",
     )
 
@@ -529,9 +500,16 @@ def add_stage_bands(fig: go.Figure, game: pd.DataFrame, s: dict, units: str, axi
                   SETTLED_INK, right=True, top=False)
 
 
-def add_stage_strip(fig: go.Figure, ids: list[int], stages: dict, names: dict,
-                    colors: dict, row: int) -> None:
+def strip_left_margin(ids: list[int], names: dict) -> int:
+    """Left margin (px) that fits the longest game name in the stage bars; the
+    line chart above uses the same margin so both share one days axis."""
+    return int(min(290, 7 * max(len(names[i]) for i in ids) + 44))
+
+
+def stage_strip(data: pd.DataFrame, ids: list[int], stages: dict, names: dict, colors: dict,
+                days: int, left: int) -> go.Figure:
     """One bar per game on the days axis: ↗ growth, ↘ falloff, then where it ends up."""
+    fig = go.Figure()
     for appid in reversed(ids):          # first game on top
         s, name, color = stages[appid], names[appid], colors[appid]
         end = s["last_day"] + 1
@@ -568,43 +546,44 @@ def add_stage_strip(fig: go.Figure, ids: list[int], stages: dict, names: dict,
                 x=[x1 - x0], base=[x0], y=[label], orientation="h",
                 marker=dict(color=color, opacity=alpha, line_width=0),
                 text=[text], textposition="inside", insidetextanchor="middle",
-                textfont=dict(size=11, color="#FFFFFF" if alpha > .5 else INK),
+                textfont=dict(size=12, color="#FFFFFF" if alpha > .5 else INK),
                 hovertemplate=(f"<b>{escape(name)}</b> · {escape(s['shape'])}<br>"
                                f"{escape(hover)}<extra></extra>"),
-                showlegend=False, width=.62,
-            ), row=row, col=1)
-    fig.update_layout(barmode="overlay", uniformtext=dict(minsize=9, mode="hide"))
-    fig.update_yaxes(showgrid=False, tickfont=dict(color=INK, size=12), row=row, col=1)
-    fig.update_xaxes(showgrid=False, row=row, col=1)
+                showlegend=False, width=.78,
+            ))
+    base_layout(fig, STRIP_ROW * len(ids) + 58)
+    fig.update_layout(barmode="overlay", uniformtext=dict(minsize=9, mode="hide"),
+                      margin=dict(l=left, r=10, t=4, b=6))
+    fig.update_yaxes(showgrid=False, automargin=False, tickfont=dict(color=INK, size=13))
+    fig.update_xaxes(showgrid=False, showline=True, linecolor=GRID, zeroline=False,
+                     tickfont=dict(color=MUTED), range=x_range(data, ids, SINCE_RELEASE, days),
+                     title=SINCE_RELEASE)
+    return fig
 
 
 def trend_chart(data: pd.DataFrame, ids: list[int], stages: dict, colors: dict, names: dict,
-                units: str, axis: str, days: int) -> go.Figure:
+                units: str, axis: str, days: int, left: int | None = None) -> go.Figure:
+    """The line chart. It has no fixed height: it stretches to the bottom of the
+    window (see the chart box on the page). With several games on the days axis,
+    the stage bars are a separate chart below it (`stage_strip`), lined up through
+    the shared left margin `left`."""
     single = len(ids) == 1
-    strip = not single and axis == SINCE_RELEASE
-    if strip:
-        strip_share = min(0.55, (34 * len(ids) + 40) / (460 + 34 * len(ids) + 40))
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-                            row_heights=[1 - strip_share, strip_share])
-        where = dict(row=1, col=1)
-    else:
-        fig, where = go.Figure(), {}
+    strip = left is not None
+    fig = go.Figure()
     for appid in ids:
         add_game(fig, data.loc[data["appid"].eq(appid)], names[appid], colors[appid],
-                 units, axis, show_daily=single, legend=not single and not strip, **where)
+                 units, axis, show_daily=single, legend=not single and not strip)
     if single:
-        appid = ids[0]
         add_stage_bands(fig, data.loc[data["appid"].eq(appid)], stages[appid],
                         units, axis, days, labels=True)
+    base_layout(fig, None)
+    style_axes(fig, units)
+    fig.update_xaxes(range=x_range(data, ids, axis, days),
+                     title=SINCE_RELEASE if axis == SINCE_RELEASE and not strip else None)
+    fig.update_yaxes(title="Share of peak players" if units == PCT else "Players online at once")
     if strip:
-        add_stage_strip(fig, ids, stages, names, colors, row=2)
-    base_layout(fig, 460 + (34 * len(ids) + 40 if strip else 0))
-    style_axes(fig, units, **where)
-    fig.update_xaxes(range=x_range(data, ids, axis, days))
-    title = SINCE_RELEASE if axis == SINCE_RELEASE else None
-    fig.update_xaxes(title=title, row=2 if strip else None, col=1 if strip else None)
-    fig.update_yaxes(title="Share of peak players" if units == PCT else "Players online at once",
-                     **where)
+        fig.update_layout(margin=dict(l=left, r=10, t=12, b=4))
+        fig.update_yaxes(automargin=False)
     return fig
 
 
@@ -628,65 +607,59 @@ def small_multiples(data: pd.DataFrame, ids: list[int], stages: dict, colors: di
                         xref=f"x{suffix}", yref=f"y{suffix}")
         style_axes(fig, units, **where)
         fig.update_xaxes(range=x_range(data, [appid], axis, days), **where)
-    base_layout(fig, max(340, nrows * 300))
+    base_layout(fig, max(300, nrows * 230))
     fig.update_layout(margin=dict(t=60))
     return fig
 
 
 # ------------------------------ page ------------------------------
 
-SHAPE_BLURB = {
-    "Falls off": "busiest in its first two weeks, then declines",
-    "Peaks late": "climbs for a few weeks, then declines",
-    "Grows": "ends up above its launch week",
-}
-
-
-def stage_cards(s: dict, accent: str, meta: str = "") -> str:
-    """The game's shape, then three cards in reading order."""
-    def card(step: str, big: str, small: str, color: str) -> str:
-        return (f'<div class="op-card" style="--accent:{color}"><div class="op-step">{step}</div>'
-                f'<div class="op-big">{big}</div><div class="op-small">{small}</div></div>')
+def stage_cards(s: dict, accent: str) -> str:
+    """Three cards in reading order: a heading, then a big number with its context
+    on the same line. Extra detail is in each card's hover tooltip."""
+    def card(num: int, title: str, big: str, unit: str, color: str, tip: str) -> str:
+        return (f'<div class="op-card" style="--accent:{color}" title="{escape(tip)}">'
+                f'<div class="op-head"><span class="op-num">{num}</span>{title}</div>'
+                f'<div class="op-value"><span class="op-big">{big}</span>'
+                f'<span class="op-unit">{unit}</span></div></div>')
 
     arrow = '<div class="op-arrow">→</div>'
-    pattern = (f'<div class="op-pattern"><b>{SHAPE_ICON[s["shape"]]} {s["shape"]}</b> · '
-               f'{SHAPE_BLURB[s["shape"]]}</div>'
-               + (f'<div class="op-meta">{escape(meta)}</div>' if meta else ""))
     d = s["peak_date"]
-    end_small = f"{vs_launch_text(s['end_vs_launch'])}, average of days {s['tail_start']}–{s['last_day']}"
-
+    tail = f"days {s['tail_start']}–{s['last_day']}"
+    end_tip = f"Average daily peak over {tail}"
     if s["shape"] == GROWS:
-        first = card("1 · Launch week", f"{s['launch_week']:,.0f} players",
-                     "average daily peak, days 0–6", accent)
-        growth_small = f"to ≈ {s['growth_top']:,.0f} by day {s['growth_day']} (7-day average)"
+        growth_tip = f"7-day average grew to ≈ {s['growth_top']:,.0f} by day {s['growth_day']}"
         if s["has_falloff"]:
-            growth_small += f", then lost {s['lost_pct']:.0f}% by day {s['knee']}"
-        second = card("2 · Growth", up_text(s["growth_x"]), growth_small, GROWTH_INK)
-        third = card(f"3 · Days {s['tail_start']}–{s['last_day']}", f"≈ {s['settled']:,.0f} players",
-                     end_small, SETTLED_INK)
+            growth_tip += f", then lost {s['lost_pct']:.0f}% by day {s['knee']}"
+        cards = [
+            card(1, "Launch week", f"{s['launch_week']:,.0f}", "players",
+                 accent, "Average daily peak over days 0–6"),
+            card(2, "Growth", change_text(s["growth_x"]), f"by day {s['growth_day']}",
+                 GROWTH_INK, growth_tip),
+            card(3, tail.capitalize(), f"≈ {s['settled']:,.0f}", vs_launch_text(s["end_vs_launch"]),
+                 SETTLED_INK, end_tip),
+        ]
     else:
         if s["shape"] == LATE_PEAK:
-            first = card("1 · Climb", up_text(s["growth_x"]),
-                         f"from launch week to ≈ {s['growth_top']:,.0f} by day {s['growth_day']} "
-                         f"(7-day average)", GROWTH_INK)
+            first = card(1, "Climb", change_text(s["growth_x"]), f"by day {s['growth_day']}",
+                         GROWTH_INK, f"From launch week to ≈ {s['growth_top']:,.0f} (7-day average)")
         else:
-            first = card("1 · Launch", f"{s['peak']:,.0f} players",
-                         f"most at once, on {day_label(s['peak_day']).lower()} "
-                         f"({d:%b} {d.day}, {d.year})", accent)
+            first = card(1, "Launch peak", f"{s['peak']:,.0f}", f"on day {s['peak_day']}",
+                         accent, f"Most players at once: {d:%b} {d.day}, {d.year}")
         if s["has_falloff"]:
-            second = card("2 · Falloff", f"Lost {s['lost_pct']:.0f}%",
-                          f"in {s['falloff_days']} days, leveling off on day {s['knee']}",
-                          FALLOFF_INK)
+            second = card(2, "Falloff", f"−{s['lost_pct']:.0f}%", f"in {s['falloff_days']} days",
+                          FALLOFF_INK, f"Leveling off on day {s['knee']}")
         else:
-            second = card("2 · Falloff", "—", "No clear leveling-off within 180 days", FALLOFF_INK)
-        third = card("3 · Settled", f"≈ {s['settled']:,.0f} players", end_small, SETTLED_INK)
-    return f'{pattern}<div class="op-stages">{first}{arrow}{second}{arrow}{third}</div>'
+            second = card(2, "Falloff", "—", "no clear leveling-off", FALLOFF_INK,
+                          "No clear leveling-off within 180 days")
+        cards = [first, second,
+                 card(3, "Settled", f"≈ {s['settled']:,.0f}", vs_launch_text(s["end_vs_launch"]),
+                      SETTLED_INK, end_tip)]
+    return f'<div class="op-stages">{arrow.join(cards)}</div>'
 
 
 st.markdown(
-    '<div class="op-name">How fast do players leave after launch?</div>'
-    '<div class="op-sub">The most people playing each game at the same time, '
-    'day by day for the first six months after release.</div>',
+    '<div class="op-name">How fast do players leave after launch?</div>',
     unsafe_allow_html=True,
 )
 
@@ -697,169 +670,190 @@ colors = {appid: PALETTE[i % len(PALETTE)] for i, appid in enumerate(game_ids)}
 stages = {appid: game_stages(data.loc[data["appid"].eq(appid)]) for appid in game_ids}
 
 info = load_info(INFO_PATH.stat().st_mtime_ns if INFO_PATH.is_file() else None)
-FILTER_KEYS = ["f_price", "f_year", "f_genre", "f_mode", "f_publisher"]
-
-
-def clear_filters() -> None:
-    for key in FILTER_KEYS:
-        st.session_state.pop(key, None)
-
-
-def mark(label: str, changed: bool) -> str:
-    """A colored dot on a filter's label while it's off its default."""
-    return f"{label} :red[●]" if changed else label
-
+FILTER_KEYS = ["f_price", "f_year", "f_genre", "f_mode"]
 
 if len(info):
     sub = info.loc[[i for i in game_ids if i in info.index]]
     all_genres = sorted({g for gs in sub["genre_list"] for g in gs})
-    all_publishers = sorted({p for ps in sub["publisher_list"] for p in ps}, key=str.casefold)
     year_span = (int(sub["year"].min()), int(sub["year"].max()))
     top_price = sub["launch_price_usd"].max()
     price_span = (0, int(math.ceil((top_price if pd.notna(top_price) else 70) / 10) * 10))
+    DEFAULTS = {"f_price": price_span, "f_year": year_span, "f_genre": ANY_GENRE, "f_mode": ANY_TYPE}
 
 
-def follow_selection() -> None:
-    """When games are picked or removed, move the filters to frame them."""
-    picked = st.session_state.get("games")
-    if picked and len(info):
-        st.session_state.update(snap_filters(sub, picked, price_span, year_span))
+def clear_filters() -> None:
+    """Reset every filter. Values are set explicitly: removing a slider's key
+    leaves the old handles on screen."""
+    st.session_state.update(DEFAULTS)
+    st.session_state["chips"] = None
 
 
-if "games" not in st.session_state:          # first load: default game, filters framing it
+def remove_chip() -> None:
+    """Clicking an active-filter chip resets that one filter."""
+    key = st.session_state.get("chip_keys", {}).get(st.session_state.get("chips"))
+    if key:
+        st.session_state[key] = DEFAULTS[key]
+    st.session_state["chips"] = None
+
+
+def mark(label: str, changed: bool) -> str:
+    """A colored dot on a filter's label while it's in use."""
+    return f"{label} :red[●]" if changed else label
+
+
+DEFINITIONS = """
+**Launch peak**: the most people playing at the same time, and the day it happened.
+
+**Growth** (games that grow first): from launch to the busiest point.
+
+**Falloff**: from the busiest point to where the decline levels off, i.e. where the
+curve bends from falling fast to nearly flat. Shown as the share of players lost and
+how many days it took.
+
+**Settled**: where the game ends up: the average daily peak over days 150–179,
+compared with launch week (days 0–6).
+
+*Players* are each day's peak number of people playing at the same time. The thick
+line is a 7-day average, which evens out weekends.
+"""
+
+if "games" not in st.session_state:
     st.session_state["games"] = game_ids[:1]
-    follow_selection()
 
-# ---- Sidebar: filters (as in the design sketches) ----
+# ---- Sidebar: game search first, then the filters ----
 shown = game_ids
 with st.sidebar:
-    st.markdown('<div class="op-side">Filters</div>', unsafe_allow_html=True)
+    st.markdown('<div class="op-side">Filter games</div>', unsafe_allow_html=True)
     if len(info):
         state = st.session_state
-        changed = {
-            "f_price": tuple(state.get("f_price", price_span)) != price_span,
-            "f_year": tuple(state.get("f_year", year_span)) != year_span,
-            "f_genre": state.get("f_genre", ANY_GENRE) != ANY_GENRE,
-            "f_mode": state.get("f_mode", ANY_TYPE) != ANY_TYPE,
-            "f_publisher": state.get("f_publisher", ANY_PUBLISHER) != ANY_PUBLISHER,
-        }
-        prices = st.slider(mark("Launch price", changed["f_price"]), *price_span,
-                           **({} if "f_price" in state else {"value": price_span}),
-                           step=5, key="f_price", format="$%d",
-                           help="Price on Steam at release; $0 = free to play.")
-        years = st.slider(mark("Release year", changed["f_year"]), *year_span,
-                          **({} if "f_year" in state else {"value": year_span}), key="f_year")
-        genre = st.selectbox(mark("Genre", changed["f_genre"]), [ANY_GENRE] + all_genres,
-                             key="f_genre")
-        game_type = st.selectbox(mark("Game type", changed["f_mode"]), GAME_TYPES, key="f_mode",
-                                 help="The game's main way to play, checked by the team. "
-                                      "Games that are both count in either.")
-        publisher = st.radio(mark("Publisher", changed["f_publisher"]),
-                             [ANY_PUBLISHER] + all_publishers, key="f_publisher")
-        active = sum(changed.values())
-        st.button("Clear filters" + (f" ({active})" if active else ""), on_click=clear_filters,
-                  disabled=not active, width="stretch")
+        for key, default in DEFAULTS.items():      # first load
+            state.setdefault(key, default)
+        args = filter_args(state["f_genre"], state["f_mode"], state["f_year"], state["f_price"],
+                           year_span, price_span)
+        changed = {"f_price": args["prices"] is not None, "f_year": args["years"] is not None,
+                   "f_genre": bool(args["genres"]), "f_mode": bool(args["modes"])}
+        if any(changed.values()):
+            allowed = filter_games(sub, **args)
+            shown = [i for i in game_ids if i in allowed]
+
+    # Picked games stay on the chart even if they don't match the filters:
+    # filters only narrow the list of games you can add.
+    picked = st.session_state.get("games") or []
+    options = [i for i in game_ids if i in shown or i in picked]
+    count = (f"{len(shown)} of {len(game_ids)} match the filters" if len(shown) < len(game_ids)
+             else f"All {len(game_ids)} games")
+    st.markdown(f'<div class="op-pick">Select games</div><div class="op-picksub">{count}</div>',
+                unsafe_allow_html=True)
+    ids = st.multiselect("Select games", options=options, key="games", format_func=names.get,
+                         label_visibility="collapsed",
+                         placeholder="Search for a game to add…" if shown
+                         else "No games match the filters")
+
+    if len(info):
+        chips = {}
+        if changed["f_genre"]:
+            chips[state["f_genre"]] = "f_genre"
+        if changed["f_mode"]:
+            chips[state["f_mode"]] = "f_mode"
+        if changed["f_price"]:
+            chips[f"${state['f_price'][0]}–${state['f_price'][1]}"] = "f_price"
+        if changed["f_year"]:
+            chips[f"{state['f_year'][0]}–{state['f_year'][1]}"] = "f_year"
+        if chips:
+            state["chip_keys"] = chips
+            st.pills("Active filters", list(chips), key="chips", on_change=remove_chip,
+                     format_func=lambda c: f"{c}  ✕", help="Click a filter to remove it.")
+            st.button("Clear all filters", key="clear_filters", on_click=clear_filters,
+                      width="stretch")
+        st.divider()
+        st.slider(mark("Launch price", changed["f_price"]), *price_span, step=5, key="f_price",
+                  format="$%d", help="Price on Steam at release; $0 = free to play.")
+        st.slider(mark("Release year", changed["f_year"]), *year_span, key="f_year")
+        genre_counts = option_counts(sub, args, "genres", all_genres)
+        st.selectbox(mark("Genre", changed["f_genre"]), [ANY_GENRE] + all_genres, key="f_genre",
+                     format_func=lambda g: g if g == ANY_GENRE else f"{g} ({genre_counts[g]})")
+        type_counts = option_counts(sub, args, "modes", GAME_TYPES[1:])
+        st.selectbox(mark("Game type", changed["f_mode"]), GAME_TYPES, key="f_mode",
+                     format_func=lambda t: t if t == ANY_TYPE else f"{t} ({type_counts[t]})",
+                     help="The game's main way to play, checked by the team. "
+                          "Games that are both count in either.")
         unreviewed = int((~sub["reviewed"]).sum())
         if unreviewed:
             st.caption(f"⚠️ Launch prices and game types are drafts: the team has "
                        f"checked {len(sub) - unreviewed} of {len(sub)} games so far.")
-        if active:
-            allowed = filter_games(
-                sub,
-                genres=[genre] if changed["f_genre"] else (),
-                publishers=[publisher] if changed["f_publisher"] else (),
-                modes=[game_type, "Both"] if changed["f_mode"] else (),
-                years=years if changed["f_year"] else None,
-                prices=prices if changed["f_price"] else None,
-            )
-            shown = [i for i in game_ids if i in allowed]
 
-# ---- Game picker and chart controls ----
+# ---- Chart controls ----
 with st.container(border=True):
-    # Keep the picked games that still match; if the filters removed all of
-    # them, start from the first match instead of an empty chart.
-    picked = st.session_state.get("games") or []
-    kept = [g for g in picked if g in shown]
-    st.session_state["games"] = kept if kept or not picked else shown[:1]
-    ids = st.multiselect(
-        "Games", options=shown, key="games", format_func=names.get, on_change=follow_selection,
-        placeholder="Search for a game to add…" if shown else "No games match the filters",
-        help="Type to search. Pick several games to compare them. The filters on the left "
-             "move to match the games you pick, so this list shows similar games.",
-    )
-    st.caption(f"Showing {len(shown)} of {len(game_ids)} games: the filters on the left follow "
-               f"your picks. Use “Clear filters” to see every game." if len(shown) < len(game_ids)
-               else f"All {len(game_ids)} games available.")
-
-    left, mid, right = st.columns([2, 1, 1], gap="large")
-    with left:
+    days_col, units_col, axis_col = st.columns([2.4, 2, 2.4], gap="large",
+                                               vertical_alignment="bottom")
+    with days_col:
         days = st.slider("Days after release", min_value=MIN_DAYS, max_value=MAX_DAYS,
                          value=MAX_DAYS, step=1, key="days")
-    with mid:
-        units = st.radio("Show", [PCT, PLAYERS], horizontal=True,
-                         help="% of peak puts games of different sizes on the same scale: "
-                              "100% is the game's busiest day.")
-    with right:
-        axis = st.radio("Time axis", [SINCE_RELEASE, CALENDAR], horizontal=True,
-                        format_func=lambda a: "Since release" if a == SINCE_RELEASE else "Calendar")
+    with units_col:
+        units = st.segmented_control(
+            "Values as", [PCT, PLAYERS], default=PCT, required=True, key="units", width="stretch",
+            help="% of peak puts games of different sizes on the same scale: "
+                 "100% is the game's busiest day.")
+    with axis_col:
+        axis = st.segmented_control(
+            "Time axis", [SINCE_RELEASE, CALENDAR], default=SINCE_RELEASE, required=True,
+            key="axis", width="stretch",
+            format_func=lambda a: "Since release" if a == SINCE_RELEASE else "Calendar")
 
 if not ids:
-    st.info("Pick at least one game above." if shown
-            else "No games match these filters. Try removing one, or click “Clear filters”.")
+    st.info("Pick a game in the sidebar to start." if shown
+            else "No games match these filters. Remove one, or click “Clear all filters”.")
     st.stop()
 
 ids = [i for i in game_ids if i in ids]  # keep a stable order and colors
 
 if len(ids) == 1:
-    st.markdown(stage_cards(stages[ids[0]], colors[ids[0]], game_meta(info, ids[0]) if len(info) else ""),
-                unsafe_allow_html=True)
+    cards_col, info_col = st.columns([11, 1], vertical_alignment="center", gap="small")
+    cards_col.markdown(stage_cards(stages[ids[0]], colors[ids[0]]), unsafe_allow_html=True)
+    with info_col.popover("Info", icon=":material/info:", type="tertiary",
+                          help="What do these numbers mean?"):
+        st.markdown(DEFINITIONS)
 
-with st.container(border=True):
-    layout = "One chart"
+# The line chart reaches down to the bottom of the window, whatever its size: its
+# height is the window height minus what sits above and below it (title, controls,
+# the stage cards for one game, the stage bars for several), with a minimum so it
+# never gets cramped. Plotly fills that space ("responsive" also refits it when the
+# window is resized).
+layout = st.session_state.get("layout", "One chart") if len(ids) > 1 else "One chart"
+strip = len(ids) > 1 and layout == "One chart" and axis == SINCE_RELEASE
+if layout == "One chart":
+    above = (CHART_TOP_ONE_GAME if len(ids) == 1
+             else CHART_TOP_SEVERAL + (STRIP_ROW * len(ids) + 58 if strip else 0))
+    height = f"max({CHART_MIN_HEIGHT}px, calc(100vh - {above}px))"
+    st.html("<style>"
+            # Doubled class names: more specific than Streamlit's own height rules.
+            # Streamlit gives the chart a fixed "flex: 0 0 450px" slot; replace its size.
+            f".st-key-chart_box .st-key-trend.st-key-trend{{flex:0 0 {height}!important;"
+            f"height:{height}!important}}"
+            ".st-key-chart_box .st-key-trend .stFullScreenFrame.stFullScreenFrame,"
+            ".st-key-chart_box .st-key-trend .stPlotlyChart.stPlotlyChart,"
+            ".st-key-chart_box .st-key-trend .js-plotly-plot.js-plotly-plot,"
+            ".st-key-chart_box .st-key-trend .plot-container.plot-container"
+            "{height:100%!important}</style>")
+
+with st.container(border=True, key="chart_box"):
     if len(ids) > 1:
-        layout = st.radio("Layout", ["One chart", "Side by side"], horizontal=True,
-                          label_visibility="collapsed")
-    chart = trend_chart if layout == "One chart" else small_multiples
-    fig = chart(data, ids, stages, colors, names, units, axis, days)
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False}, key="trend")
-    notes = ["Thick line: 7-day average."]
-    if len(ids) == 1 or layout != "One chart":
-        notes.append("Thin line: each day's peak.")
-        notes.append("Shading marks each stage (growth, falloff, settled); "
-                     "the dashed line is where the decline levels off.")
-    elif axis == SINCE_RELEASE:
-        notes.append("Bars below: each game's stages (↗ growth, ↘ falloff) and where it ends up "
-                     "compared with its launch week.")
+        toggle_col, info_col = st.columns([11, 1], vertical_alignment="center", gap="small")
+        with toggle_col:
+            layout = st.segmented_control("Layout", ["One chart", "Side by side"],
+                                          default="One chart", required=True, key="layout",
+                                          label_visibility="collapsed")
+        with info_col.popover("Info", icon=":material/info:", type="tertiary",
+                              help="What do the stages mean?"):
+            st.markdown(DEFINITIONS)
+    config = {"displaylogo": False, "responsive": True}
+    if layout == "One chart":
+        left = strip_left_margin(ids, names) if strip else None
+        st.plotly_chart(trend_chart(data, ids, stages, colors, names, units, axis, days, left),
+                        width="stretch", config=config, key="trend")
+        if strip:
+            st.plotly_chart(stage_strip(data, ids, stages, names, colors, days, left),
+                            width="stretch", config=config, key="strip")
     else:
-        notes.append("Switch the time axis to “Since release” to compare stages.")
-    st.caption(" ".join(notes))
-
-with st.expander("How to read this", expanded=False):
-    st.markdown(
-        "- **Players** is the highest number of people playing the game *at the same time* "
-        "on that day (peak concurrent players). It is not the number of different people "
-        "who played, and not retention.\n"
-        "- **Day 0** is the official release date on Steam. SteamDB counts days in UTC, "
-        "so for games that unlocked after midnight UTC, day 0 is the next day.\n"
-        "- **The 7-day average** smooths out the weekly rhythm: more people play on weekends.\n"
-        "- **% of peak**: 100% is the game's busiest day in its first six months.\n"
-        "- **Shapes.** ↘ *Falls off*: busiest in the first two weeks, then declines. "
-        "↗↘ *Peaks late*: climbs for 2–8 weeks first. ↗ *Grows*: busiest after about two "
-        "months, or ends above its launch week.\n"
-        "- **Stages.** *Growth* runs from launch to the top of the 7-day average, when that's "
-        "two or more weeks in. *Falloff* runs from the top to the **leveling-off point**, where "
-        "the decline flattens out: the day the curve sits furthest below a straight line drawn "
-        "from its top to day 180 (only drops of 25% or more count). *Settled* starts there; "
-        "its level (the dotted line) is the average daily peak over the last 30 days.\n"
-        "- **Compared with launch week**: the last 30 days' average divided by the average of "
-        "days 0–6. It works for every shape: 5% means the game kept a twentieth of its launch "
-        "crowd, 4× means it ended four times bigger.\n"
-        "- Everything uses all 180 days, so nothing moves with the slider."
-    )
-
-st.markdown('<div class="op-rule"></div>', unsafe_allow_html=True)
-st.caption(
-    "DATA 511 · Independent academic visualization. "
-    "Player counts: SteamDB (steamdb.info), daily peak concurrent players. "
-    "Not affiliated with Valve or SteamDB."
-)
+        st.plotly_chart(small_multiples(data, ids, stages, colors, names, units, axis, days),
+                        width="stretch", config=config, key="trend")

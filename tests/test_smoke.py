@@ -21,10 +21,8 @@ def radio(at: AppTest, label: str):
 
 
 def open_app(clear_filters: bool = False) -> AppTest:
-    at = AppTest.from_file(APP_FILE, default_timeout=120).run()
-    if clear_filters:     # on load, the filters frame the default game
-        at.button[0].click().run()
-    return at
+    # Filters start open; clear_filters is kept so older tests read the same.
+    return AppTest.from_file(APP_FILE, default_timeout=120).run()
 
 
 # AppIDs in processed/launch_daily.parquet, in build_launch_data.GAMES order.
@@ -45,16 +43,15 @@ def test_comparing_all_games_both_layouts():
     at = open_app(clear_filters=True)
     at.multiselect(key="games").set_value(ALL_GAMES).run()
     assert_healthy(at)
-    assert any("stages" in c.value for c in at.caption)   # stage strip under the chart
-    radio(at, "Layout").set_value("Side by side").run()
+    at.button_group(key="layout").set_value("Side by side").run()
     assert_healthy(at)
 
 
 def test_calendar_axis_players_and_short_window():
     at = open_app(clear_filters=True)
     at.multiselect(key="games").set_value(ALL_GAMES[:2]).run()
-    radio(at, "Time axis").set_value("Calendar date").run()
-    radio(at, "Show").set_value("Players").run()
+    at.button_group(key="axis").set_value("Calendar date").run()
+    at.button_group(key="units").set_value("Players").run()
     at.slider(key="days").set_value(14).run()
     assert_healthy(at)
 
@@ -66,58 +63,53 @@ def test_no_games_selected():
     assert at.info
 
 
-def test_filters_follow_the_default_game():
+def test_filters_start_open_and_list_every_game():
     at = open_app()
     assert_healthy(at)
-    assert at.selectbox(key="f_genre").value == "RPG"           # Elden Ring is Action|RPG
-    assert at.selectbox(key="f_mode").value == "Single-player"
-    options = at.multiselect(key="games").options
-    assert "Elden Ring" in options and "Cyberpunk 2077" in options
-    assert "Rocket League" not in options                        # not similar
+    assert at.selectbox(key="f_genre").value == "All genres"
+    assert at.slider(key="f_price").value == (0, 70)
+    assert len(at.multiselect(key="games").options) == 17
+    assert not at.button                                         # no "Clear all" until a filter is on
 
 
-def test_picking_games_moves_the_filters():
+def test_filters_never_drop_picked_games():
+    at = open_app()                                              # Elden Ring picked
+    at.selectbox(key="f_genre").set_value("Sports").run()        # Elden Ring isn't Sports
+    assert_healthy(at)
+    games = at.multiselect(key="games")
+    assert games.value == [1245620]                              # still on the chart
+    assert set(games.options) == {"Elden Ring", "Rocket League"} # picked + the one match
+    assert "1 of 17 match the filters" in " ".join(m.value for m in at.sidebar.markdown)
+
+
+def test_genre_counts_follow_other_filters():
     at = open_app()
-    at.multiselect(key="games").set_value([1245620, 1091500]).run()   # + Cyberpunk (offered)
-    assert_healthy(at)
-    assert at.slider(key="f_year").value == (2018, 2024)        # 2020-2022, ± 2 years
-    assert at.multiselect(key="games").value == [1245620, 1091500]
-    at.button[0].click().run()                                  # Clear filters: all games again
-    at.multiselect(key="games").set_value([1245620, 1091500, 377160, 72850]).run()
-    assert_healthy(at)
-    assert at.slider(key="f_year").value[0] <= 2011             # now framing Skyrim (2011) too
-    assert len(at.multiselect(key="games").value) == 4
+    genre = at.selectbox(key="f_genre")
+    assert any(o.startswith("RPG (") for o in genre.options)
+    at.selectbox(key="f_mode").set_value("Multiplayer").run()
+    rpg = next(o for o in at.selectbox(key="f_genre").options if o.startswith("RPG ("))
+    assert rpg in ("RPG (2)", "RPG (3)")                         # multiplayer RPGs only
 
 
 def test_filters_narrow_the_game_list():
-    at = open_app(clear_filters=True)
+    at = open_app()
     at.selectbox(key="f_mode").set_value("Multiplayer").run()
     assert_healthy(at)
     options = at.multiselect(key="games").options
-    assert 0 < len(options) < len(ALL_GAMES) + 20
-    assert all(name not in options for name in ("Elden Ring", "Skyrim"))
     assert "Factorio" in options                  # "Both" counts as multiplayer too
-    assert at.multiselect(key="games").value      # a matching game is picked, not an empty chart
+    assert "Skyrim" not in " ".join(options)
 
 
-def test_genre_and_publisher_filters():
-    at = open_app(clear_filters=True)
-    at.selectbox(key="f_genre").set_value("Sports").run()
-    assert at.multiselect(key="games").options == ["Rocket League"]
-    at.selectbox(key="f_genre").set_value("All genres").run()
-    at.radio(key="f_publisher").set_value("Bethesda Softworks").run()
-    assert_healthy(at)
-    assert "Fallout 4" in at.multiselect(key="games").options
-    assert "Elden Ring" not in at.multiselect(key="games").options
-
-
-def test_filters_with_no_match_and_clear():
-    at = open_app(clear_filters=True)
-    at.slider(key="f_price").set_value((0, 0)).run()            # free games only
+def test_clear_all_resets_every_filter_including_sliders():
+    at = open_app()
+    at.slider(key="f_price").set_value((0, 0)).run()             # free games only
+    at.slider(key="f_year").set_value((2020, 2022)).run()
     at.selectbox(key="f_mode").set_value("Single-player").run()
     assert_healthy(at)
-    assert not at.multiselect(key="games").options
-    assert any("No games match" in i.value for i in at.info)
-    at.button[0].click().run()                                  # Clear filters
+    assert any("No games match" in i.value for i in at.info) or at.multiselect(key="games").value
+    at.button(key="clear_filters").click().run()
     assert_healthy(at)
-    assert len(at.multiselect(key="games").options) >= len(ALL_GAMES)
+    assert at.slider(key="f_price").value == (0, 70)
+    assert at.slider(key="f_year").value[0] <= 2011
+    assert at.selectbox(key="f_mode").value == "All game types"
+    assert len(at.multiselect(key="games").options) == 17

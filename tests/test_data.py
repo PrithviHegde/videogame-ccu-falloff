@@ -288,13 +288,6 @@ def test_filter_games_combines_filters(app, info):
     assert app.filter_games(info, genres=["Action"], modes=["Single-player"]) == {1}
 
 
-def test_game_meta(app, info):
-    assert app.game_meta(info, 1) == ("Action, RPG · Big Co, Partner · $59.99 at launch · "
-                                      "Single-player · 2015 · not yet reviewed")
-    assert "Free to play" in app.game_meta(info, 2)
-    assert app.game_meta(info, 99) == ""
-
-
 def test_reviewed_flag_from_looks_good_column(app):
     raw = pd.DataFrame({
         "appid": [1, 2, 3], "game": ["A", "B", "C"],
@@ -304,50 +297,29 @@ def test_reviewed_flag_from_looks_good_column(app):
     })
     info = app.prepare_info(raw)
     assert info["reviewed"].tolist() == [True, False, True]
-    assert app.game_meta(info, 2).endswith("not yet reviewed")
-    assert not app.game_meta(info, 1).endswith("not yet reviewed")
 
 
-# ------------------------------ app: snapping ------------------------------
+# --------------------------- app: filter arguments ---------------------------
 
-SPANS = dict(price_span=(0, 70), year_span=(2010, 2025))
-
-
-def test_snap_one_game_frames_it_loosely(app, info):
-    s = app.snap_filters(info, [1], **SPANS)              # Solo RPG, $59.99, 2015
-    assert s["f_price"] == (45, 70)                         # $59.99 ± $10, to $5 steps
-    assert s["f_year"] == (2013, 2017)                      # 2015 ± 2
-    assert s["f_genre"] == "Action"                         # Action (3 games) beats RPG (1)
-    assert s["f_mode"] == "Single-player"
-    assert s["f_publisher"] == app.ANY_PUBLISHER            # not snapped for one game
+SPANS = dict(year_span=(2010, 2025), price_span=(0, 70))
 
 
-def test_snap_keeps_the_selected_games_in_the_list(app, info):
-    for sel in ([1], [2], [1, 2], [2, 3]):
-        s = app.snap_filters(info, sel, **SPANS)
-        allowed = app.filter_games(
-            info,
-            genres=[s["f_genre"]] if s["f_genre"] != app.ANY_GENRE else (),
-            publishers=[s["f_publisher"]] if s["f_publisher"] != app.ANY_PUBLISHER else (),
-            modes=[s["f_mode"], "Both"] if s["f_mode"] != app.ANY_TYPE else (),
-            years=s["f_year"], prices=s["f_price"])
-        assert set(sel) <= allowed, sel
+def test_filter_args_defaults_apply_nothing(app):
+    args = app.filter_args(app.ANY_GENRE, app.ANY_TYPE, (2010, 2025), (0, 70), **SPANS)
+    assert args == {"genres": (), "modes": (), "years": None, "prices": None}
 
 
-def test_snap_mixed_selection_leaves_unshared_filters_open(app, info):
-    s = app.snap_filters(info, [1, 3], **SPANS)             # Action|RPG + Simulation|Indie
-    assert s["f_genre"] == app.ANY_GENRE
-    assert s["f_mode"] == "Single-player"                   # Single-player + Both
-    s = app.snap_filters(info, [1, 2], **SPANS)             # Single-player + Multiplayer
-    assert s["f_mode"] == app.ANY_TYPE
-    assert s["f_publisher"] == "Big Co"                     # shared by 2+ games
+def test_filter_args_active_values(app):
+    args = app.filter_args("RPG", "Multiplayer", (2015, 2020), (0, 30), **SPANS)
+    assert args == {"genres": ["RPG"], "modes": ["Multiplayer", "Both"],
+                    "years": (2015, 2020), "prices": (0, 30)}
 
 
-def test_snap_unknown_price_leaves_price_open(app, info):
-    assert app.snap_filters(info, [4], **SPANS)["f_price"] == (0, 70)
-
-
-def test_snap_nothing_selected_is_all_defaults(app, info):
-    s = app.snap_filters(info, [], **SPANS)
-    assert s == {"f_price": (0, 70), "f_year": (2010, 2025), "f_genre": app.ANY_GENRE,
-                 "f_mode": app.ANY_TYPE, "f_publisher": app.ANY_PUBLISHER}
+def test_option_counts_use_the_other_filters(app, info):
+    args = app.filter_args(app.ANY_GENRE, "Multiplayer", (2010, 2025), (0, 70), **SPANS)
+    counts = app.option_counts(info, args, "genres", ["Action", "Simulation"])
+    # Multiplayer or Both: Shooter (Action), Co-op Sim (Simulation), Odd Tags (Action).
+    assert counts == {"Action": 2, "Simulation": 1}
+    args = app.filter_args("Action", app.ANY_TYPE, (2010, 2025), (0, 70), **SPANS)
+    assert app.option_counts(info, args, "modes", ["Single-player", "Multiplayer"]) == \
+        {"Single-player": 1, "Multiplayer": 2}
