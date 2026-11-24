@@ -241,3 +241,85 @@ def test_compact_numbers(app):
     assert app.compact(1_234) == "1.2k"
     assert app.compact(67_401) == "67k"
     assert app.compact(2_415_714) == "2.4M"
+
+
+# ------------------------------ app: filters ------------------------------
+
+@pytest.fixture
+def info(app):
+    raw = pd.DataFrame({
+        "appid": [1, 2, 3, 4],
+        "game": ["Solo RPG", "Shooter", "Co-op Sim", "Odd Tags"],
+        "release_date": ["2015-11-10", "2020-11-04", "2020-08-14", "2024-12-05"],
+        "genres": ["Action|RPG", "Action|Free To Play", "Simulation|Indie", "Racing|Strategy|Free To Play"],
+        "genres_override": [None, None, "", "Action"],
+        "publishers": ["Big Co|Partner", "Big Co", "Small Studio", "Other"],
+        "main_mode": ["Single-player", "Multiplayer", "Both", "Multiplayer"],
+        "launch_price_usd": [59.99, 0.0, 30.0, None],
+    })
+    return app.prepare_info(raw)
+
+
+def test_prepare_info_genres(app, info):
+    assert info.loc[2, "genre_list"] == ["Action"]          # "Free To Play" is not a genre
+    assert info.loc[3, "genre_list"] == ["Simulation", "Indie"]   # blank override: Steam's genres
+    assert info.loc[4, "genre_list"] == ["Action"]          # override replaces Steam's tags
+    assert info.loc[1, "publisher_list"] == ["Big Co", "Partner"]
+    assert info.loc[1, "year"] == 2015
+
+
+def test_filter_games_no_filters_keeps_everything(app, info):
+    assert app.filter_games(info) == {1, 2, 3, 4}
+
+
+def test_filter_games_genre_and_publisher_match_any(app, info):
+    assert app.filter_games(info, genres=["Action"]) == {1, 2, 4}
+    assert app.filter_games(info, publishers=["Partner", "Small Studio"]) == {1, 3}
+
+
+def test_filter_games_mode_year_price(app, info):
+    assert app.filter_games(info, modes=["Multiplayer"]) == {2, 4}
+    assert app.filter_games(info, years=(2016, 2021)) == {2, 3}
+    assert app.filter_games(info, prices=(0, 0)) == {2}            # free games
+    assert app.filter_games(info, prices=(0, 70)) == {1, 2, 3}     # unknown price is left out
+
+
+def test_filter_games_combines_filters(app, info):
+    assert app.filter_games(info, genres=["Action"], modes=["Single-player"]) == {1}
+
+
+def test_reviewed_flag_from_looks_good_column(app):
+    raw = pd.DataFrame({
+        "appid": [1, 2, 3], "game": ["A", "B", "C"],
+        "release_date": ["2020-01-01"] * 3, "genres": ["RPG"] * 3, "publishers": ["X"] * 3,
+        "main_mode": ["Single-player"] * 3, "launch_price_usd": [10, 10, 10],
+        "Looks Good?": ["Yes", None, "TRUE"],
+    })
+    info = app.prepare_info(raw)
+    assert info["reviewed"].tolist() == [True, False, True]
+
+
+# --------------------------- app: filter arguments ---------------------------
+
+SPANS = dict(year_span=(2010, 2025), price_span=(0, 70))
+
+
+def test_filter_args_defaults_apply_nothing(app):
+    args = app.filter_args(app.ANY_GENRE, app.ANY_TYPE, (2010, 2025), (0, 70), **SPANS)
+    assert args == {"genres": (), "modes": (), "years": None, "prices": None}
+
+
+def test_filter_args_active_values(app):
+    args = app.filter_args("RPG", "Multiplayer", (2015, 2020), (0, 30), **SPANS)
+    assert args == {"genres": ["RPG"], "modes": ["Multiplayer", "Both"],
+                    "years": (2015, 2020), "prices": (0, 30)}
+
+
+def test_option_counts_use_the_other_filters(app, info):
+    args = app.filter_args(app.ANY_GENRE, "Multiplayer", (2010, 2025), (0, 70), **SPANS)
+    counts = app.option_counts(info, args, "genres", ["Action", "Simulation"])
+    # Multiplayer or Both: Shooter (Action), Co-op Sim (Simulation), Odd Tags (Action).
+    assert counts == {"Action": 2, "Simulation": 1}
+    args = app.filter_args("Action", app.ANY_TYPE, (2010, 2025), (0, 70), **SPANS)
+    assert app.option_counts(info, args, "modes", ["Single-player", "Multiplayer"]) == \
+        {"Single-player": 1, "Multiplayer": 2}
